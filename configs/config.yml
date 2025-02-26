@@ -1,0 +1,26 @@
+models_to_run:
+  - FAN
+  - FANGated
+#  - MLP
+
+datasets_to_run:
+  - sin
+#  - mod
+  #  - complex_1
+  #  etc.
+
+data_versions:
+  - original
+  - noisy
+#  - sparse
+
+hyperparameters:
+  num_samples: 10000
+  test_samples: 4000
+  noise_level: 0.1
+  sparsity_factor: 0.5
+  epochs:  5
+  lr: 0.001
+
+logging:
+  level: "INFO"  # Could be DEBUG, INFO, WARNING, ERROR, etc.
