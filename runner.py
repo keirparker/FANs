@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 import json
 
-from utils.config_utils import load_config, setup_environment
+from utils.config_utils import load_config, setup_environment, fix_seed
 from utils.device_utils import select_device
 from utils.data_utils import add_noise, make_sparse
 from utils.training_utils import train_model
@@ -390,6 +390,7 @@ def main():
     """
     # Setup logging
     setup_logger()
+    fix_seed(1738)
 
     # Log script start
     logger.info(

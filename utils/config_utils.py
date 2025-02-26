@@ -98,3 +98,25 @@ def setup_logging(config):
     logger.add(lambda msg: print(msg), level=log_level)  # Console handler
 
     logger.info(f"Logging configured with level {log_level}")
+
+
+def fix_seed(seed):
+    """
+    Fix random seed for reproducibility.
+
+    Args:
+        seed: Random seed value
+
+    Returns:
+        None
+    """
+    import random
+    import numpy as np
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    logger.info(f"Random seed set to {seed}")
