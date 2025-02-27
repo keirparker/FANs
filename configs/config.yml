@@ -1,26 +1,33 @@
+experiment_name: "experiment_3"
+
 models_to_run:
   - FAN
   - FANGated
-#  - MLP
+  - MLP
 
 datasets_to_run:
   - sin
-#  - mod
+  - mod
   #  - complex_1
   #  etc.
 
 data_versions:
   - original
   - noisy
-#  - sparse
+  - sparse
 
 hyperparameters:
+  early_stopping: True
+  early_stopping_patience: 100
+  early_stopping_min_delta: 0.0001
   num_samples: 10000
   test_samples: 4000
   noise_level: 0.1
   sparsity_factor: 0.5
-  epochs:  5
-  lr: 0.001
+  epochs: 10000
+  lr: 0.00001
 
 logging:
   level: "INFO"  # Could be DEBUG, INFO, WARNING, ERROR, etc.
+
+random_seed: 42

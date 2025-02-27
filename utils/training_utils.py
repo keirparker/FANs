@@ -172,7 +172,6 @@ def compute_metrics(y_true, y_pred):
         "mape": float(mape),
     }
 
-
 def train_model(model, t_train, data_train, config, device, validation_split=0.2):
     """
     Enhanced training loop with loss tracking and validation.
@@ -218,6 +217,7 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
 
     # History tracking
     history = {
+        "epochs": [],  # Added epochs tracking
         "train_loss": [],
         "val_loss": [] if has_validation else None,
         "learning_rate": [],
@@ -236,6 +236,9 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
     # Training loop
     for epoch in range(num_epochs):
         start_time = time.time()
+
+        # Track epoch number (added this line)
+        history["epochs"].append(epoch)
 
         # Training phase
         model.train()
@@ -325,3 +328,4 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
         history["epoch_times"].append(epoch_time)
 
     return history
+

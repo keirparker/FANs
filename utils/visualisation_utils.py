@@ -122,7 +122,8 @@ def plot_training_history(
     # Plot 1: Loss curves (top left)
     ax1 = fig.add_subplot(gs[0, 0])
 
-    epochs = range(1, len(history["train_loss"]) + 1)
+    # Generate epochs based on the actual number of training loss entries
+    epochs = list(range(1, len(history["train_loss"]) + 1))
     ax1.plot(
         epochs,
         history["train_loss"],
@@ -135,8 +136,10 @@ def plot_training_history(
     )
 
     if "val_loss" in history and history["val_loss"] is not None:
+        # Make sure the epochs match validation loss length
+        val_epochs = list(range(1, len(history["val_loss"]) + 1))
         ax1.plot(
-            epochs,
+            val_epochs,
             history["val_loss"],
             label="Validation",
             marker="x",
@@ -167,8 +170,10 @@ def plot_training_history(
     # Plot 2: Learning Rate vs Epochs (top right)
     ax2 = fig.add_subplot(gs[0, 1])
     if "learning_rate" in history:
+        # Make sure epochs match learning rate length
+        lr_epochs = list(range(1, len(history["learning_rate"]) + 1))
         ax2.plot(
-            epochs,
+            lr_epochs,
             history["learning_rate"],
             marker="o",
             markersize=4,
@@ -197,8 +202,10 @@ def plot_training_history(
 
     if "metrics" in history and history["metrics"] and "r2" in history["metrics"][0]:
         r2_values = [metrics["r2"] for metrics in history["metrics"]]
+        # Make sure epochs match metrics length
+        metrics_epochs = list(range(1, len(r2_values) + 1))
         ax3.plot(
-            epochs,
+            metrics_epochs,
             r2_values,
             marker="o",
             markersize=4,
@@ -238,8 +245,10 @@ def plot_training_history(
         # Check for RMSE
         if all("rmse" in m for m in history["metrics"]):
             rmse_values = [metrics["rmse"] for metrics in history["metrics"]]
+            # Make sure epochs match metrics length
+            metrics_epochs = list(range(1, len(rmse_values) + 1))
             ax4.plot(
-                epochs,
+                metrics_epochs,
                 rmse_values,
                 marker="o",
                 markersize=4,
@@ -253,8 +262,10 @@ def plot_training_history(
         # Check for MAE
         if all("mae" in m for m in history["metrics"]):
             mae_values = [metrics["mae"] for metrics in history["metrics"]]
+            # Make sure epochs match metrics length
+            mae_epochs = list(range(1, len(mae_values) + 1))
             ax4.plot(
-                epochs,
+                mae_epochs,
                 mae_values,
                 marker="^",
                 markersize=4,
@@ -311,8 +322,10 @@ def plot_training_history(
     # Generate epoch timing plot if time data is available
     if "epoch_times" in history and len(history["epoch_times"]) > 0:
         fig = plt.figure(**viz_config.get_figure_kwargs())
+        # Make sure epochs match epoch_times length
+        time_epochs = list(range(1, len(history["epoch_times"]) + 1))
         plt.plot(
-            epochs,
+            time_epochs,
             history["epoch_times"],
             marker="o",
             markersize=4,
@@ -326,7 +339,7 @@ def plot_training_history(
         if window_size > 1:
             conv_filter = np.ones(window_size) / window_size
             smoothed = np.convolve(history["epoch_times"], conv_filter, mode="valid")
-            valid_epochs = list(epochs)[window_size - 1 :]
+            valid_epochs = list(range(1, len(smoothed) + 1))
             plt.plot(
                 valid_epochs,
                 smoothed,
@@ -383,9 +396,10 @@ def plot_training_history(
             )
 
             # Add loss curves
+            epochs = list(range(1, len(history["train_loss"]) + 1))
             fig.add_trace(
                 go.Scatter(
-                    x=list(epochs),
+                    x=epochs,
                     y=history["train_loss"],
                     mode="lines+markers",
                     name="Training Loss",
@@ -396,9 +410,10 @@ def plot_training_history(
             )
 
             if "val_loss" in history and history["val_loss"] is not None:
+                val_epochs = list(range(1, len(history["val_loss"]) + 1))
                 fig.add_trace(
                     go.Scatter(
-                        x=list(epochs),
+                        x=val_epochs,
                         y=history["val_loss"],
                         mode="lines+markers",
                         name="Validation Loss",
