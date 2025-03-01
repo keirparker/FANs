@@ -26,8 +26,8 @@ def complex_5_fn(x: np.ndarray) -> np.ndarray:
 PERIODIC_SPECS = {
     "sin": {
         "period": 6,
-        "domain_train": lambda p, ns: np.linspace(-p*np.pi, p*np.pi, ns),
-        "domain_test":  lambda p, ns: np.linspace(-3*p*np.pi, 3*p*np.pi, ns),
+        "domain_train": lambda p, ns: np.linspace(-4*p*np.pi, 4*p*np.pi, ns),
+        "domain_test":  lambda p, ns: np.linspace(-12*p*np.pi, 12*p*np.pi, ns),
         "data_fn":      lambda t: np.sin(t),
         "config": {
             "batchsize": 32,
@@ -41,8 +41,8 @@ PERIODIC_SPECS = {
     },
     "mod": {
         "period": 20,
-        "domain_train": lambda p, ns: np.linspace(-p, p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-2*p, 2*p, ns),
+        "domain_train": lambda p, ns: np.linspace(-4*p, 4*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-12*p, 12*p, ns),
         "data_fn":      lambda t: np.mod(t, 5),
         "config": {
             "batchsize": 32,
@@ -56,8 +56,8 @@ PERIODIC_SPECS = {
     },
     "complex_1": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-p, p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-2*p, 2*p, ns),
+        "domain_train": lambda p, ns: np.linspace(-4*p, 4*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-12*p, 12*p, ns),
         "data_fn":      lambda t: np.exp(np.sin(np.pi * t)**2 + np.cos(t) + np.mod(t, 3) - 1),
         "config": {
             "batchsize": 32,
@@ -71,8 +71,8 @@ PERIODIC_SPECS = {
     },
     "complex_2": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-p, p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-2*p, 2*p, ns),
+        "domain_train": lambda p, ns: np.linspace(-4*p, 4*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-12*p, 12*p, ns),
         "data_fn":      lambda t: (1 + np.sin(t)) * np.sin(2 * t),
         "config": {
             "batchsize": 32,

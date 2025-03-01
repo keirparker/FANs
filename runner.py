@@ -185,6 +185,7 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                 # Calculate and log training time
                 training_time = time.time() - train_start_time
                 mlflow.log_metric("training_time_seconds", training_time)
+                mlflow.log_metric("last epoch", history["epochs"][-1])
                 logger.info(f"Training completed in {training_time:.2f} seconds")
 
                 # 4. Evaluate on test set

@@ -224,7 +224,9 @@ def generate_model_summary_table(run_ids, experiment_name):
             try:
                 first_run = client.get_run(run_ids[0])
                 experiment_id = first_run.info.experiment_id
-                logger.info(f"Using experiment ID: {experiment_id} from run {run_ids[0]}")
+                logger.info(
+                    f"Using experiment ID: {experiment_id} from run {run_ids[0]}"
+                )
             except Exception as e:
                 logger.warning(f"Could not get experiment ID from run: {e}")
 
@@ -234,14 +236,24 @@ def generate_model_summary_table(run_ids, experiment_name):
                     experiment = mlflow.get_experiment_by_name(experiment_name)
                     if experiment:
                         experiment_id = experiment.experiment_id
-                        logger.info(f"Using experiment ID: {experiment_id} from experiment name")
+                        logger.info(
+                            f"Using experiment ID: {experiment_id} from experiment name"
+                        )
                 except Exception as e:
                     logger.warning(f"Could not get experiment ID by name: {e}")
         else:
             logger.warning("No run IDs provided")
             return None
 
-        metrics_to_include = ["test_r2", "test_rmse", "test_mae", "test_mape", "training_time_seconds"]
+        metrics_to_include = [
+            "test_r2",
+            "test_rmse",
+            "test_mae",
+            "test_mape",
+            "training_time_seconds",
+            "last_epoch",
+            "last epoch",
+        ]
 
         # Get runs data
         runs_data = []
@@ -270,9 +282,9 @@ def generate_model_summary_table(run_ids, experiment_name):
             # Add metrics
             for metric in metrics_to_include:
                 if metric in run.data.metrics:
-                    run_data[metric] = run.data.metrics[metric]
-                else:
-                    run_data[metric] = None
+                    # Use the metric name without spaces for the DataFrame
+                    clean_metric_name = metric.replace(" ", "_")
+                    run_data[clean_metric_name] = run.data.metrics[metric]
 
             # Add epochs information
             if "epochs" in run.data.params:
@@ -281,7 +293,9 @@ def generate_model_summary_table(run_ids, experiment_name):
             # Add final loss values
             for loss_type in ["train_loss", "val_loss"]:
                 if f"final_{loss_type}" in run.data.metrics:
-                    run_data[f"final_{loss_type}"] = run.data.metrics[f"final_{loss_type}"]
+                    run_data[f"final_{loss_type}"] = run.data.metrics[
+                        f"final_{loss_type}"
+                    ]
 
             table_data.append(run_data)
 
@@ -292,67 +306,153 @@ def generate_model_summary_table(run_ids, experiment_name):
         # Create DataFrame
         df = pd.DataFrame(table_data)
 
-        # Sort by dataset, model and data version
-        if all(col in df.columns for col in ["dataset", "model", "data_version"]):
-            df = df.sort_values(by=["dataset", "model", "data_version"])
+        # Sort by dataset, data_version, and model
+        if all(col in df.columns for col in ["dataset", "data_version", "model"]):
+            df = df.sort_values(by=["dataset", "data_version", "model"])
 
         # Add timestamp and user information
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        username = os.environ.get('USER', 'keirparker')
+        username = os.environ.get("USER", "keirparker")
 
         # Generate file paths with timestamp to avoid overwriting
         timestr = time.strftime("%Y%m%d-%H%M%S")
         os.makedirs("results", exist_ok=True)
 
-        html_path = f"results/summary_table_{experiment_name.replace(' ', '_')}_{timestr}.html"
-        csv_path = f"results/summary_table_{experiment_name.replace(' ', '_')}_{timestr}.csv"
+        html_path = (
+            f"results/summary_table_{experiment_name.replace(' ', '_')}_{timestr}.html"
+        )
+        csv_path = (
+            f"results/summary_table_{experiment_name.replace(' ', '_')}_{timestr}.csv"
+        )
 
-        # Create styled HTML
-        styled_df = df.style.set_caption(f"Model Performance Summary - {experiment_name}")
+        # Add a group column for dataset + data_version
+        df["group"] = df["dataset"] + "_" + df["data_version"]
 
-        # Highlight best values for each dataset
-        for dataset in df["dataset"].unique():
-            dataset_mask = df["dataset"] == dataset
-            for metric in metrics_to_include:
-                if metric in df.columns and metric != "training_time_seconds":
-                    if metric == "test_r2":  # Higher is better
-                        best_idx = df.loc[dataset_mask, metric].idxmax()
-                        if pd.notna(best_idx):
-                            styled_df = styled_df.highlight_max(
-                                subset=pd.IndexSlice[pd.Index([best_idx]), [metric]],
-                                color="lightgreen"
+        # Prepare data for highlighting best metrics
+        metrics_to_highlight = [
+            "test_r2",
+            "test_rmse",
+            "test_mae",
+            "test_mape",
+            "final_train_loss",
+            "final_val_loss",
+        ]
+
+        # Dictionary to store indices of cells to highlight for each metric
+        highlight_cells = {metric: [] for metric in metrics_to_highlight}
+
+        # Find best metrics in each group
+        for group_name in df["group"].unique():
+            group_indices = df.index[df["group"] == group_name].tolist()
+
+            # Find best values within group for each metric
+            for metric in metrics_to_highlight:
+                if metric in df.columns:
+                    # Filter out NaN values
+                    group_df = df.loc[group_indices]
+                    valid_metrics = group_df[~group_df[metric].isna()]
+
+                    if not valid_metrics.empty:
+                        if metric == "test_r2":  # Higher is better
+                            best_value = valid_metrics[metric].max()
+                            best_indices = valid_metrics[
+                                valid_metrics[metric] == best_value
+                            ].index.tolist()
+                        else:  # Lower is better
+                            best_value = valid_metrics[metric].min()
+                            best_indices = valid_metrics[
+                                valid_metrics[metric] == best_value
+                            ].index.tolist()
+
+                        # Store indices to highlight
+                        for idx in best_indices:
+                            highlight_cells[metric].append(idx)
+
+        # Create a manual HTML table with styling
+        html_content = []
+        html_content.append("<html><head>")
+        html_content.append("<style>")
+        html_content.append("table { border-collapse: collapse; width: 100%; }")
+        html_content.append(
+            "th, td { padding: 8px; text-align: left; border: 1px solid #ddd; }"
+        )
+        html_content.append("tr.group-start { border-top: 2px solid black; }")
+        html_content.append("td.highlight { background-color: lightgreen; }")
+        html_content.append("th { background-color: #f2f2f2; }")
+        html_content.append("</style>")
+        html_content.append("</head><body>")
+        html_content.append(f"<h2>Model Performance Summary - {experiment_name}</h2>")
+        html_content.append("<table>")
+
+        # Header row
+        html_content.append("<tr>")
+        for col in df.columns:
+            if col != "group":  # Skip the group column
+                html_content.append(f"<th>{col}</th>")
+        html_content.append("</tr>")
+
+        # Data rows
+        prev_group = None
+        for i, row in df.iterrows():
+            # Check if group has changed
+            if prev_group != row["group"] or i == df.index[0]:
+                html_content.append('<tr class="group-start">')
+            else:
+                html_content.append("<tr>")
+
+            # Add cells
+            for col in df.columns:
+                if col != "group":  # Skip the group column
+                    value = row[col]
+
+                    # Format numeric values
+                    if col in ["test_r2", "test_rmse", "test_mae", "test_mape"]:
+                        if pd.notnull(value):
+                            value = f"{value:.4f}"
+                    elif col == "test_mape":
+                        if pd.notnull(value):
+                            value = f"{value:.2f}"
+                    elif col in ["training_time_seconds"]:
+                        if pd.notnull(value):
+                            value = f"{value:.2f}"
+                    elif col in ["final_train_loss", "final_val_loss"]:
+                        if pd.notnull(value):
+                            value = f"{value:.6f}"
+                    elif col == "last_epoch":
+                        if pd.notnull(value):
+                            value = (
+                                f"{int(value)}"
+                                if isinstance(value, (int, float))
+                                else value
                             )
-                    else:  # Lower is better
-                        best_idx = df.loc[dataset_mask, metric].idxmin()
-                        if pd.notna(best_idx):
-                            styled_df = styled_df.highlight_min(
-                                subset=pd.IndexSlice[pd.Index([best_idx]), [metric]],
-                                color="lightgreen"
-                            )
 
-        # Format numeric columns
-        numeric_format = {
-            "test_r2": "{:.4f}",
-            "test_rmse": "{:.4f}",
-            "test_mae": "{:.4f}",
-            "test_mape": "{:.2f}",
-            "training_time_seconds": "{:.2f}",
-            "final_train_loss": "{:.6f}",
-            "final_val_loss": "{:.6f}"
-        }
+                    # Check if cell should be highlighted
+                    if col in metrics_to_highlight and i in highlight_cells[col]:
+                        html_content.append(f'<td class="highlight">{value}</td>')
+                    else:
+                        html_content.append(f"<td>{value}</td>")
 
-        for col, fmt in numeric_format.items():
-            if col in df.columns:
-                styled_df = styled_df.format({col: fmt})
+            html_content.append("</tr>")
+            prev_group = row["group"]
 
-        # Save files
-        styled_df.to_html(html_path)
-        df.to_csv(csv_path)
+        # Close HTML
+        html_content.append("</table>")
+        html_content.append("</body></html>")
+
+        # Write HTML to file
+        with open(html_path, "w") as f:
+            f.write("\n".join(html_content))
+
+        # Save CSV without the group column
+        df_csv = df.drop(columns=["group"])
+        df_csv.to_csv(csv_path, index=False)
 
         # Now log to MLflow under the same experiment
         if experiment_id:
             # Log as a special "summary" run within the same experiment
-            with mlflow.start_run(run_name=f"Summary-{timestr}", experiment_id=experiment_id):
+            with mlflow.start_run(
+                run_name=f"Summary-{timestr}", experiment_id=experiment_id
+            ):
                 # Log artifacts
                 mlflow.log_artifact(html_path)
                 mlflow.log_artifact(csv_path)
@@ -367,20 +467,21 @@ def generate_model_summary_table(run_ids, experiment_name):
                 # Log the run IDs that were analyzed
                 mlflow.log_param("analyzed_runs", ",".join(run_ids))
 
-                logger.info(f"Summary table logged to MLflow experiment '{experiment_name}' and saved to {html_path}")
+                logger.info(
+                    f"Summary table logged to MLflow experiment '{experiment_name}' and saved to {html_path}"
+                )
                 logger.info(f"Summary run ID: {mlflow.active_run().info.run_id}")
         else:
             logger.warning("Could not log to MLflow - no experiment ID found")
             logger.info(f"Summary table saved locally to {html_path}")
 
-        return df
-
+        return df_csv
     except Exception as e:
         logger.error(f"Error generating summary table: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return None
-    
+
 
 def generate_model_rankings(run_ids=None, experiment_id=None, metrics=None, output_dir="results"):
     """
