@@ -19,11 +19,15 @@ from utils.device_utils import select_device
 from utils.data_utils import add_noise, make_sparse
 from utils.training_utils import train_model
 from utils.modelling_utils import evaluate_model
-from utils.evaluation_utils import generate_model_summary_table
+from utils.evaluation_utils import (
+    generate_model_summary_table,
+    plot_losses_by_epoch_comparison
+)
 from utils.visualisation_utils import (
     plot_training_history,
     plot_model_predictions,
     log_plots_to_mlflow,
+    create_enhanced_visualizations
 )
 from src.signal_gen import get_periodic_data
 from src.models import get_model_by_name
@@ -384,7 +388,6 @@ def save_run_ids(run_ids, experiment_name):
 
     logger.info(f"Saved {len(run_ids)} run IDs to {filename}")
 
-
 def main():
     """
     Main entry point. Loads configuration and runs all specified experiments.
@@ -468,19 +471,38 @@ def main():
         # Generate summary table - make sure it goes to the same experiment
         if all_run_ids:
             logger.info("Generating summary table...")
-            summary_df = generate_model_summary_table(
-                all_run_ids, experiment_name
-            )
+            summary_df = generate_model_summary_table(all_run_ids, experiment_name)
             if summary_df is not None:
                 logger.info(f"Summary table generated with {len(summary_df)} runs")
             else:
                 logger.warning("Failed to generate summary table")
 
-        # Suggest running the analysis script
-        logger.info(
-            "To analyze and compare results, run the analyze_models.py script with:\n"
-            f'python analyze_models.py --experiment-name "{experiment_name}" --all'
-        )
+            # NEW CODE: Generate loss comparison plots
+            logger.info("Generating loss comparison plots...")
+
+            # Training loss comparison
+            train_loss_plot = plot_losses_by_epoch_comparison(
+                run_ids=all_run_ids, metric_name="train_loss", include_validation=False
+            )
+
+            # # Combined training and validation loss comparison
+            # combined_loss_plot = plot_losses_by_epoch_comparison(
+            #     run_ids=all_run_ids,
+            #     metric_name="train_loss",
+            #     include_validation=False,
+            #     smooth_factor=3,  # Apply some smoothing for better readability
+            # )
+
+            # Log the plots to MLflow
+            if train_loss_plot:
+                if all_run_ids:
+                    logger.info("Generating enhanced visualizations...")
+                    create_enhanced_visualizations(
+                        all_run_ids, experiment_id, experiment_name
+                    )
+
+
+
 
     except Exception as e:
         logger.error(f"Error in main execution: {e}")

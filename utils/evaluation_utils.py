@@ -1110,3 +1110,188 @@ def get_run_ids_from_experiment(
     except Exception as e:
         logger.error(f"Error getting run IDs from experiment: {e}")
         return []
+
+
+def plot_losses_by_epoch_comparison(
+    run_ids=None,
+    experiment_id=None,
+    metric_name="train_loss",
+    output_dir="plots",
+    include_validation=True,
+    smooth_factor=None,
+):
+    """
+    Plot loss curves by epoch for multiple runs on the same graph for comparison.
+
+    Args:
+        run_ids: List of MLflow run IDs to compare
+        experiment_id: MLflow experiment ID to use (if run_ids is None)
+        metric_name: Base metric name to plot (train_loss, val_loss, etc.)
+        output_dir: Directory to save output files
+        include_validation: Whether to include validation loss if available
+        smooth_factor: Factor to use for curve smoothing (None for no smoothing)
+
+    Returns:
+        str: Path to the saved comparison plot
+    """
+    try:
+        logger.info(f"Generating loss comparison plot for {metric_name}")
+        client = MlflowClient()
+
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Get runs data
+        runs_data = []
+
+        if run_ids:
+            for run_id in run_ids:
+                try:
+                    run = client.get_run(run_id)
+                    runs_data.append(run)
+                except:
+                    logger.warning(f"Could not find run with ID: {run_id}")
+        elif experiment_id:
+            runs = client.search_runs(experiment_ids=[experiment_id])
+            runs_data = runs
+        else:
+            logger.warning("No runs specified for comparison")
+            return None
+
+        if not runs_data:
+            logger.warning("No runs found for comparison")
+            return None
+
+        # Create figure
+        plt.figure(figsize=(12, 8))
+
+        # Use seaborn for better colors
+        colors = sns.color_palette("husl", len(runs_data))
+
+        # Track the maximum epochs seen
+        max_epochs = 0
+
+        # Plot data for each run
+        for i, run in enumerate(runs_data):
+            # Get run info for the legend
+            model_name = run.data.params.get("model", "unknown")
+            dataset_type = run.data.params.get("dataset_type", "unknown")
+            data_version = run.data.params.get("data_version", "unknown")
+
+            run_name = f"{model_name} ({dataset_type}-{data_version})"
+
+            # Extract loss values by epoch for training loss
+            train_loss_by_epoch = {}
+            val_loss_by_epoch = {}
+
+            # Look for epoch-specific metrics
+            for key, value in run.data.metrics.items():
+                # Training loss by epoch
+                if key.startswith(f"{metric_name}_epoch_"):
+                    try:
+                        epoch = int(key.split("_")[-1])
+                        train_loss_by_epoch[epoch] = value
+                        max_epochs = max(max_epochs, epoch)
+                    except ValueError:
+                        continue
+
+                # Validation loss by epoch (if requested)
+                if include_validation and key.startswith("val_loss_epoch_"):
+                    try:
+                        epoch = int(key.split("_")[-1])
+                        val_loss_by_epoch[epoch] = value
+                        max_epochs = max(max_epochs, epoch)
+                    except ValueError:
+                        continue
+
+            # Plot training loss if we have epoch data
+            if train_loss_by_epoch:
+                epochs = sorted(train_loss_by_epoch.keys())
+                losses = [train_loss_by_epoch[e] for e in epochs]
+
+                if smooth_factor and len(losses) > smooth_factor:
+                    # Apply smoothing if requested
+                    smooth_losses = np.convolve(
+                        losses, np.ones(smooth_factor) / smooth_factor, mode="valid"
+                    )
+                    plt.plot(
+                        epochs[smooth_factor - 1 :],
+                        smooth_losses,
+                        label=f"{run_name} (train)",
+                        color=colors[i],
+                        linewidth=2,
+                    )
+                else:
+                    plt.plot(
+                        epochs,
+                        losses,
+                        label=f"{run_name} (train)",
+                        color=colors[i],
+                        linewidth=2,
+                    )
+
+            # Plot validation loss if available and requested
+            if include_validation and val_loss_by_epoch:
+                val_epochs = sorted(val_loss_by_epoch.keys())
+                val_losses = [val_loss_by_epoch[e] for e in val_epochs]
+
+                if smooth_factor and len(val_losses) > smooth_factor:
+                    # Apply smoothing if requested
+                    smooth_val_losses = np.convolve(
+                        val_losses, np.ones(smooth_factor) / smooth_factor, mode="valid"
+                    )
+                    plt.plot(
+                        val_epochs[smooth_factor - 1 :],
+                        smooth_val_losses,
+                        label=f"{run_name} (val)",
+                        color=colors[i],
+                        linewidth=2,
+                        linestyle="--",
+                    )
+                else:
+                    plt.plot(
+                        val_epochs,
+                        val_losses,
+                        label=f"{run_name} (val)",
+                        color=colors[i],
+                        linewidth=2,
+                        linestyle="--",
+                    )
+
+        # Add plot labels and styling
+        plt.xlabel("Epoch", fontsize=12)
+        plt.ylabel("Loss", fontsize=12)
+        plt.title("Loss Comparison Across Models by Epoch", fontsize=14)
+        plt.grid(True, linestyle="--", alpha=0.7)
+        plt.legend(fontsize=9, loc="upper right", bbox_to_anchor=(1.15, 1))
+
+        # Format axes for readability
+        plt.tight_layout()
+
+        # Generate filename
+        timestr = time.strftime("%Y%m%d-%H%M%S")
+
+        # If we have many runs, use a shorter filename
+        if len(runs_data) > 3:
+            comparison_path = (
+                f"{output_dir}/loss_comparison_{len(runs_data)}_models_{timestr}.png"
+            )
+        else:
+            # Create list of model names
+            model_names = [run.data.params.get("model", "unknown") for run in runs_data]
+            model_str = "_".join(model_names)
+            comparison_path = f"{output_dir}/loss_comparison_{model_str}_{timestr}.png"
+
+        # Save the plot
+        plt.savefig(comparison_path, bbox_inches="tight", dpi=300)
+        plt.close()
+
+        logger.info(f"Loss comparison plot saved to {comparison_path}")
+        return comparison_path
+
+    except Exception as e:
+        logger.error(f"Error generating loss comparison plot: {e}")
+        import traceback
+
+        logger.error(traceback.format_exc())
+        return None

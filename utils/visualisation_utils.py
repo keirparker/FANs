@@ -19,9 +19,11 @@ import seaborn as sns
 from typing import Dict, List, Optional, Callable
 from loguru import logger
 from datetime import datetime
+import mlflow
 
 # Configure matplotlib for high-quality output
 plt.style.use("seaborn-v0_8-whitegrid")
+sns.set_context("notebook", font_scale=1.1)
 mpl.rcParams.update(
     {
         "figure.dpi": 150,
@@ -743,6 +745,894 @@ def log_plots_to_mlflow(
         logger.warning("MLflow not installed, skipping logging of plots")
     except Exception as e:
         logger.error(f"Error logging plots to MLflow: {e}")
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from typing import Dict, List, Optional
+import pandas as pd
+
+# Set styling for plots
+plt.style.use("seaborn-v0_8-whitegrid")
+sns.set_context("notebook", font_scale=1.1)
+
+
+def plot_separate_loss_curves(
+    run_ids: List[str],
+    experiment_name: str = None,
+    group_by: str = "dataset_type",
+    output_dir: str = "plots",
+    show_markers: bool = True,
+    line_smoothing: float = 0.0,
+    max_per_plot: int = 4,
+):
+    """
+    Create separate loss plots grouped by dataset, model, or data version.
+
+    Args:
+        run_ids: List of MLflow run IDs to include
+        experiment_name: Name for the experiment/collection of plots
+        group_by: How to group plots - 'dataset_type', 'data_version', or 'model'
+        output_dir: Directory to save output plots
+        show_markers: Whether to show data points as markers
+        line_smoothing: Smoothing factor (0.0 = raw data, higher values = more smoothing)
+        max_per_plot: Maximum number of curves to show in a single plot
+
+    Returns:
+        List of paths to saved plots
+    """
+    logger.info(f"Generating separated loss plots grouped by {group_by}")
+
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Get data from MLflow runs
+    client = mlflow.tracking.MlflowClient()
+
+    # Store metrics by group
+    metrics_data = []
+    groups = set()
+
+    # Extract data from runs
+    for run_id in run_ids:
+        try:
+            run = client.get_run(run_id)
+
+            # Extract metadata
+            model = run.data.params.get("model", "unknown")
+            dataset_type = run.data.params.get("dataset_type", "unknown")
+            data_version = run.data.params.get("data_version", "unknown")
+
+            # Extract epoch-specific metrics
+            for key, value in run.data.metrics.items():
+                if key.startswith("train_loss_epoch_") or key.startswith(
+                    "val_loss_epoch_"
+                ):
+                    try:
+                        parts = key.split("_")
+                        metric_type = "train" if parts[0] == "train" else "val"
+                        epoch = int(parts[-1])
+
+                        # Determine grouping key
+                        if group_by == "dataset_type":
+                            group = dataset_type
+                        elif group_by == "data_version":
+                            group = data_version
+                        elif group_by == "model":
+                            group = model
+                        else:
+                            group = dataset_type  # Default to dataset
+
+                        groups.add(group)
+
+                        # Add to metrics data
+                        metrics_data.append(
+                            {
+                                "group": group,
+                                "model": model,
+                                "dataset_type": dataset_type,
+                                "data_version": data_version,
+                                "metric_type": metric_type,
+                                "epoch": epoch,
+                                "value": value,
+                                "run_id": run_id,
+                                "label": f"{model} ({data_version}, {metric_type})",
+                            }
+                        )
+
+                    except (ValueError, IndexError):
+                        continue
+
+        except Exception as e:
+            logger.warning(f"Error processing run {run_id}: {e}")
+
+    if not metrics_data:
+        logger.warning("No loss data found in the provided runs")
+        return []
+
+    # Convert to dataframe for easier manipulation
+    df = pd.DataFrame(metrics_data)
+
+    # Sort by epoch for each label
+    df = df.sort_values(by=["group", "label", "epoch"])
+
+    # Generate plots - one per group
+    plot_paths = []
+
+    for group in sorted(groups):
+        # Get data for this group
+        group_df = df[df["group"] == group]
+
+        # Get unique model/version/type combinations
+        unique_labels = group_df["label"].unique()
+
+        # Create multiple plots if there are too many curves
+        for plot_idx, labels_subset in enumerate(
+            [
+                unique_labels[i : i + max_per_plot]
+                for i in range(0, len(unique_labels), max_per_plot)
+            ]
+        ):
+            # Create figure
+            plt.figure(figsize=(10, 6))
+
+            # Color palette
+            colors = sns.color_palette("husl", len(labels_subset))
+
+            # Plot each curve
+            legend_entries = []
+
+            for i, label in enumerate(labels_subset):
+                curve_data = group_df[group_df["label"] == label]
+
+                if curve_data.empty:
+                    continue
+
+                epochs = curve_data["epoch"].values
+                values = curve_data["value"].values
+
+                # Apply smoothing if requested
+                if line_smoothing > 0:
+                    values = apply_smoothing(values, line_smoothing)
+
+                # Determine line style based on metric type
+                is_val = "val" in label
+                linestyle = "--" if is_val else "-"
+                marker = "x" if is_val else "o"
+                alpha = 0.7 if is_val else 1.0
+
+                # Plot the line
+                line = plt.plot(
+                    epochs,
+                    values,
+                    linestyle=linestyle,
+                    color=colors[i],
+                    linewidth=2,
+                    alpha=alpha,
+                    label=label,
+                )[0]
+
+                # Add markers if requested
+                if show_markers:
+                    plt.scatter(
+                        epochs,
+                        curve_data["value"].values,  # Original unsmoothed values
+                        marker=marker,
+                        s=30,
+                        color=line.get_color(),
+                        alpha=0.8,
+                        edgecolors="white",
+                        linewidth=0.5,
+                    )
+
+                legend_entries.append(label)
+
+            # Customize plot
+            plt.title(f"Loss Curves - {group}", fontsize=14)
+            plt.xlabel("Epoch", fontsize=12)
+            plt.ylabel("Loss", fontsize=12)
+            plt.grid(True, linestyle="--", alpha=0.7)
+
+            # Add legend
+            if legend_entries:
+                plt.legend(fontsize=10, loc="best")
+
+            # Determine if log scale would be better
+            if len(legend_entries) > 0:
+                values = group_df[group_df["label"].isin(labels_subset)]["value"]
+                if values.max() / values.min() > 10:
+                    plt.yscale("log")
+
+            # Adjust layout
+            plt.tight_layout()
+
+            # Save plot
+            timestr = time.strftime("%Y%m%d-%H%M%S")
+            plot_filename = (
+                f"{output_dir}/loss_plot_{group}_part{plot_idx + 1}_{timestr}.png"
+            )
+            plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
+            plt.close()
+
+            plot_paths.append(plot_filename)
+            logger.info(f"Created loss plot: {plot_filename}")
+
+    return plot_paths
+
+
+def plot_loss_grid(
+    run_ids: List[str],
+    output_dir: str = "plots",
+    show_markers: bool = True,
+    line_smoothing: float = 0.0,
+):
+    """
+    Create a grid of loss plots organized by dataset and data version.
+
+    Args:
+        run_ids: List of MLflow run IDs to include
+        output_dir: Directory to save output plots
+        show_markers: Whether to show data points as markers
+        line_smoothing: Smoothing factor (0.0 = raw data, higher values = more smoothing)
+
+    Returns:
+        Path to the saved grid plot
+    """
+    logger.info("Generating loss plot grid")
+
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Get data from MLflow runs
+    client = mlflow.tracking.MlflowClient()
+
+    # Extract metadata from runs to determine grid dimensions
+    datasets = set()
+    data_versions = set()
+    models = {}  # Dictionary of model names to data
+
+    # Extract data from runs
+    run_data = {}
+
+    for run_id in run_ids:
+        try:
+            run = client.get_run(run_id)
+
+            # Extract metadata
+            model = run.data.params.get("model", "unknown")
+            dataset_type = run.data.params.get("dataset_type", "unknown")
+            data_version = run.data.params.get("data_version", "unknown")
+
+            datasets.add(dataset_type)
+            data_versions.add(data_version)
+
+            key = f"{model}_{dataset_type}_{data_version}"
+            run_data[key] = {"train": {}}
+
+            if model not in models:
+                models[model] = {"color": None}  # Color will be assigned later
+
+            # Extract epoch-specific metrics
+            for metric_key, value in run.data.metrics.items():
+                if metric_key.startswith("train_loss_epoch_"):
+                    try:
+                        epoch = int(metric_key.split("_")[-1])
+                        run_data[key]["train"][epoch] = value
+                    except (ValueError, IndexError):
+                        continue
+
+        except Exception as e:
+            logger.warning(f"Error processing run {run_id}: {e}")
+
+    if not run_data:
+        logger.warning("No loss data found in the provided runs")
+        return None
+
+    # Assign colors to models
+    model_colors = dict(zip(models.keys(), sns.color_palette("husl", len(models))))
+    for model in models:
+        models[model]["color"] = model_colors[model]
+
+    # Sort datasets and data versions for consistent ordering
+    datasets = sorted(datasets)
+    data_versions = sorted(data_versions)
+
+    # Create grid of subplots
+    num_rows = len(datasets)
+    num_cols = len(data_versions)
+
+    # Calculate figure size based on grid dimensions
+    fig_width = max(3 * num_cols, 8)
+    fig_height = max(3 * num_rows, 6)
+
+    fig, axes = plt.subplots(
+        num_rows,
+        num_cols,
+        figsize=(fig_width, fig_height),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+    )
+
+    # Track legend handles and labels
+    legend_handles = []
+    legend_labels = []
+
+    # Fill each subplot
+    for i, dataset in enumerate(datasets):
+        for j, data_version in enumerate(data_versions):
+            ax = axes[i, j]
+
+            # Set title for this subplot
+            ax.set_title(f"{dataset} - {data_version}")
+
+            # Add data for each model
+            for model_name, model_info in models.items():
+                key = f"{model_name}_{dataset}_{data_version}"
+
+                if key not in run_data:
+                    continue
+
+                # Process train loss
+                if run_data[key]["train"]:
+                    epochs = sorted(run_data[key]["train"].keys())
+                    values = [run_data[key]["train"][e] for e in epochs]
+
+                    # Apply smoothing if requested
+                    if line_smoothing > 0 and len(values) > 3:
+                        smooth_values = apply_smoothing(values, line_smoothing)
+                    else:
+                        smooth_values = values
+
+                    # Plot line
+                    line = ax.plot(
+                        epochs,
+                        smooth_values,
+                        linestyle="-",
+                        color=model_info["color"],
+                        linewidth=2,
+                        label=f"{model_name}",
+                    )[0]
+
+                    # Add markers if requested
+                    if show_markers:
+                        ax.scatter(
+                            epochs,
+                            values,  # Original unsmoothed values
+                            marker="o",
+                            s=20,
+                            color=model_info["color"],
+                            alpha=0.7,
+                            edgecolors="white",
+                            linewidth=0.5,
+                        )
+
+                    # Only add to legend once
+                    if i == 0 and j == 0:
+                        legend_handles.append(line)
+                        legend_labels.append(f"{model_name} (train)")
+
+                # Process val loss
+                if run_data[key]["val"]:
+                    epochs = sorted(run_data[key]["val"].keys())
+                    values = [run_data[key]["val"][e] for e in epochs]
+
+                    # Apply smoothing if requested
+                    if line_smoothing > 0 and len(values) > 3:
+                        smooth_values = apply_smoothing(values, line_smoothing)
+                    else:
+                        smooth_values = values
+
+                    # Plot line with dashed style for validation
+                    val_line = ax.plot(
+                        epochs,
+                        smooth_values,
+                        linestyle="--",
+                        color=model_info["color"],
+                        linewidth=2,
+                        alpha=0.7,
+                        label=f"{model_name} (val)",
+                    )[0]
+
+                    # Add markers if requested
+                    if show_markers:
+                        ax.scatter(
+                            epochs,
+                            values,  # Original unsmoothed values
+                            marker="x",
+                            s=20,
+                            color=model_info["color"],
+                            alpha=0.7,
+                        )
+
+                    # Only add to legend once
+                    if i == 0 and j == 0:
+                        legend_handles.append(val_line)
+                        legend_labels.append(f"{model_name} (val)")
+
+            # Only label axes for edge subplots
+            if j == 0:
+                ax.set_ylabel("Loss")
+            if i == num_rows - 1:
+                ax.set_xlabel("Epoch")
+
+            # Add grid
+            ax.grid(True, linestyle="--", alpha=0.5)
+
+    # Add overall title
+    fig.suptitle("Loss Curves Comparison", fontsize=16)
+
+    # Add single legend for the entire figure
+    if legend_handles:
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0),
+            ncol=min(len(legend_handles), 4),
+            frameon=True,
+            fancybox=True,
+            shadow=True,
+        )
+
+    # Adjust layout
+    plt.tight_layout(rect=[0, 0.05, 1, 0.96])
+
+    # Save figure
+    timestr = time.strftime("%Y%m%d-%H%M%S")
+    plot_filename = f"{output_dir}/loss_grid_{timestr}.png"
+    plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    logger.info(f"Created loss grid plot: {plot_filename}")
+    return plot_filename
+
+
+def apply_smoothing(values: List[float], smoothing_factor: float) -> np.ndarray:
+    """
+    Apply smoothing to a list of values.
+
+    Args:
+        values: List of values to smooth
+        smoothing_factor: Smoothing factor (0-1, higher = more smoothing)
+
+    Returns:
+        Smoothed values
+    """
+    if smoothing_factor <= 0 or len(values) < 4:
+        return values
+
+    # Convert to numpy array for easier manipulation
+    values_array = np.array(values)
+
+    # Calculate window size based on smoothing factor
+    # Higher smoothing factor means larger window
+    smoothing_factor = min(0.9, max(0, smoothing_factor))  # Limit to 0-0.9
+    window_size = max(3, int(len(values) * smoothing_factor))
+
+    # Ensure window size is odd
+    if window_size % 2 == 0:
+        window_size += 1
+
+    # Apply convolution for smoothing
+    window = np.ones(window_size) / window_size
+    smoothed = np.convolve(values_array, window, mode="same")
+
+    # Fix edges (where convolution doesn't have full window)
+    half_window = window_size // 2
+
+    # Handle start of array
+    for i in range(half_window):
+        window_size_edge = i + half_window + 1
+        if window_size_edge > 0:
+            smoothed[i] = np.sum(values_array[:window_size_edge]) / window_size_edge
+
+    # Handle end of array
+    for i in range(half_window):
+        idx = len(values) - i - 1
+        window_size_edge = i + half_window + 1
+        if window_size_edge > 0:
+            smoothed[idx] = np.sum(values_array[-window_size_edge:]) / window_size_edge
+
+    return smoothed
+
+
+def log_enhanced_plots_to_mlflow(
+    experiment_id: str,
+    run_ids: List[str],
+    output_dir: str = "plots",
+    artifact_path: str = "enhanced_plots",
+):
+    """
+    Generate and log enhanced loss plots to MLflow.
+
+    Args:
+        experiment_id: MLflow experiment ID
+        run_ids: List of run IDs to include in visualization
+        output_dir: Directory to save intermediate plots
+        artifact_path: Path within MLflow artifacts to store plots
+
+    Returns:
+        List of generated file paths
+    """
+    logger.info("Generating and logging enhanced loss plots to MLflow")
+
+    # Generate the different plot types
+    plot_paths = []
+
+    # Generate separated plots by dataset
+    dataset_plots = plot_separate_loss_curves(
+        run_ids,
+        group_by="dataset_type",
+        output_dir=output_dir,
+        show_markers=False,
+        line_smoothing=0.0,  # No smoothing
+        max_per_plot=20,
+    )
+    plot_paths.extend(dataset_plots)
+
+    # Generate separated plots by data version
+    version_plots = plot_separate_loss_curves(
+        run_ids,
+        group_by="data_version",
+        output_dir=output_dir,
+        show_markers=False,
+        line_smoothing=0.0,  # No smoothing
+        max_per_plot=20,
+    )
+    plot_paths.extend(version_plots)
+
+    # Generate a grid plot
+    grid_plot = plot_loss_grid(
+        run_ids,
+        output_dir=output_dir,
+        show_markers=True,
+        line_smoothing=0.0,  # No smoothing
+    )
+    if grid_plot:
+        plot_paths.append(grid_plot)
+
+    # Log plots to MLflow as a separate "summary" run
+    if plot_paths:
+        timestr = time.strftime("%Y%m%d-%H%M%S")
+
+        with mlflow.start_run(
+            run_name=f"EnhancedPlots-{timestr}", experiment_id=experiment_id
+        ):
+            # Log artifacts
+            for plot_path in plot_paths:
+                mlflow.log_artifact(plot_path, artifact_path)
+
+            # Log metadata
+            mlflow.set_tag("plot_type", "enhanced_loss_plots")
+            mlflow.set_tag("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            mlflow.set_tag("generated_by", os.environ.get("USER", "keirparker"))
+            mlflow.set_tag("runs_visualized", len(run_ids))
+            mlflow.set_tag("is_summary", "true")
+
+            # Log the run IDs that were analyzed
+            mlflow.log_param("analyzed_runs", ",".join(run_ids))
+
+            logger.info(
+                f"Enhanced plots logged to MLflow with run ID: {mlflow.active_run().info.run_id}"
+            )
+
+    return plot_paths
+
+
+def plot_loss_by_subgroups(
+    run_ids: List[str],
+    output_dir: str = "plots",
+    show_markers: bool = True,
+    line_smoothing: float = 0.0,
+):
+    """
+    Create separate loss plots for each dataset/datatype subgroup,
+    with each plot showing all models for that specific subgroup.
+
+    Args:
+        run_ids: List of MLflow run IDs to include
+        output_dir: Directory to save output plots
+        show_markers: Whether to show data points as markers
+        line_smoothing: Smoothing factor (0.0 = raw data, higher values = more smoothing)
+
+    Returns:
+        List of paths to saved plots
+    """
+    logger.info("Generating loss plots by dataset/datatype subgroups")
+
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Get data from MLflow runs
+    client = mlflow.tracking.MlflowClient()
+
+    # Data structure to hold all run data
+    all_data = {}
+
+    # Extract data from runs
+    for run_id in run_ids:
+        try:
+            run = client.get_run(run_id)
+
+            # Extract metadata
+            model = run.data.params.get("model", "unknown")
+            dataset_type = run.data.params.get("dataset_type", "unknown")
+            data_version = run.data.params.get("data_version", "unknown")
+
+            # Create subgroup key for this dataset/datatype combination
+            subgroup_key = f"{dataset_type}_{data_version}"
+
+            # Initialize subgroup entry if it doesn't exist
+            if subgroup_key not in all_data:
+                all_data[subgroup_key] = {
+                    "dataset_type": dataset_type,
+                    "data_version": data_version,
+                    "models": {},
+                }
+
+            # Initialize model entry if it doesn't exist
+            if model not in all_data[subgroup_key]["models"]:
+                all_data[subgroup_key]["models"][model] = {"train": {}}
+
+            # Extract epoch-specific metrics
+            for metric_key, value in run.data.metrics.items():
+                if metric_key.startswith("train_loss_epoch_"):
+                    try:
+                        epoch = int(metric_key.split("_")[-1])
+                        all_data[subgroup_key]["models"][model]["train"][epoch] = value
+                    except (ValueError, IndexError):
+                        continue
+
+
+        except Exception as e:
+            logger.warning(f"Error processing run {run_id}: {e}")
+
+    if not all_data:
+        logger.warning("No loss data found in the provided runs")
+        return []
+
+    # Generate plots - one for each subgroup
+    plot_paths = []
+
+    # Create a consistent color palette for models across all plots
+    all_models = set()
+    for subgroup_data in all_data.values():
+        all_models.update(subgroup_data["models"].keys())
+
+    model_colors = dict(
+        zip(sorted(list(all_models)), sns.color_palette("husl", len(all_models)))
+    )
+
+    # Create one plot per subgroup
+    for subgroup_key, subgroup_data in sorted(all_data.items()):
+        dataset_type = subgroup_data["dataset_type"]
+        data_version = subgroup_data["data_version"]
+        models = subgroup_data["models"]
+
+        # Skip if no models have data
+        if not models:
+            continue
+
+        # Create figure
+        plt.figure(figsize=(12, 6))
+
+        # Plot each model's train and validation loss
+        for model_name, model_data in sorted(models.items()):
+            color = model_colors[model_name]
+
+            # Plot training loss
+            if model_data["train"]:
+                epochs = sorted(model_data["train"].keys())
+                values = [model_data["train"][e] for e in epochs]
+
+                # Apply smoothing if requested
+                if line_smoothing > 0 and len(values) > 3:
+                    smooth_values = apply_smoothing(values, line_smoothing)
+                else:
+                    smooth_values = values
+
+                # Plot line
+                line = plt.plot(
+                    epochs,
+                    smooth_values,
+                    linestyle="-",
+                    color=color,
+                    linewidth=1,
+                    label=f"{model_name}",
+                    alpha=0.9,
+                )[0]
+
+                # Add markers if requested
+                if show_markers:
+                    plt.scatter(
+                        epochs,
+                        values,  # Original unsmoothed values
+                        marker="o",
+                        s=30,
+                        color=color,
+                        alpha=0.7,
+                        edgecolors="white",
+                        linewidth=0.5,
+                    )
+
+        # Customize plot
+        plt.title(f"Loss Curves - {dataset_type} ({data_version})", fontsize=14)
+        plt.xlabel("Epoch", fontsize=12)
+        plt.ylabel("Loss", fontsize=12)
+        plt.grid(True, linestyle="--", alpha=0.7)
+
+        # Determine if log scale would be better
+        y_values = []
+        for model_data in models.values():
+            y_values.extend(list(model_data["train"].values()))
+
+        if y_values:
+            y_array = np.array(y_values)
+            if np.max(y_array) / np.min(y_array) > 10:
+                plt.yscale("log")
+
+        # Add legend - make it more compact if many models
+        if len(models) > 5:
+            plt.legend(fontsize=9, ncol=2, loc="best")
+        else:
+            plt.legend(fontsize=10, loc="best")
+
+        plt.tight_layout()
+
+        # Save plot
+        timestr = time.strftime("%Y%m%d-%H%M%S")
+        plot_filename = (
+            f"{output_dir}/loss_plot_{dataset_type}_{data_version}_{timestr}.png"
+        )
+        plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
+        plt.close()
+
+        plot_paths.append(plot_filename)
+        logger.info(f"Created loss plot: {plot_filename}")
+
+    return plot_paths
+
+
+def apply_smoothing(values: List[float], smoothing_factor: float) -> np.ndarray:
+    """
+    Apply smoothing to a list of values.
+
+    Args:
+        values: List of values to smooth
+        smoothing_factor: Smoothing factor (0-1, higher = more smoothing)
+
+    Returns:
+        Smoothed values
+    """
+    if smoothing_factor <= 0 or len(values) < 4:
+        return values
+
+    # Convert to numpy array for easier manipulation
+    values_array = np.array(values)
+
+    # Calculate window size based on smoothing factor
+    # Higher smoothing factor means larger window
+    smoothing_factor = min(0.9, max(0, smoothing_factor))  # Limit to 0-0.9
+    window_size = max(3, int(len(values) * smoothing_factor))
+
+    # Ensure window size is odd
+    if window_size % 2 == 0:
+        window_size += 1
+
+    # Apply convolution for smoothing
+    window = np.ones(window_size) / window_size
+    smoothed = np.convolve(values_array, window, mode="same")
+
+    # Fix edges (where convolution doesn't have full window)
+    half_window = window_size // 2
+
+    # Handle start of array
+    for i in range(half_window):
+        window_size_edge = i + half_window + 1
+        if window_size_edge > 0:
+            smoothed[i] = np.sum(values_array[:window_size_edge]) / window_size_edge
+
+    # Handle end of array
+    for i in range(half_window):
+        idx = len(values) - i - 1
+        window_size_edge = i + half_window + 1
+        if window_size_edge > 0:
+            smoothed[idx] = np.sum(values_array[-window_size_edge:]) / window_size_edge
+
+    return smoothed
+
+
+def log_enhanced_plots_to_mlflow(
+    experiment_id: str,
+    run_ids: List[str],
+    output_dir: str = "plots",
+    artifact_path: str = "enhanced_plots",
+):
+    """
+    Generate and log enhanced loss plots to MLflow.
+
+    Args:
+        experiment_id: MLflow experiment ID
+        run_ids: List of run IDs to include in visualization
+        output_dir: Directory to save intermediate plots
+        artifact_path: Path within MLflow artifacts to store plots
+
+    Returns:
+        List of generated file paths
+    """
+    logger.info("Generating and logging enhanced loss plots to MLflow")
+
+    # Generate loss plots by dataset/datatype subgroups
+    plot_paths = plot_loss_by_subgroups(
+        run_ids,
+        output_dir=output_dir,
+        show_markers=False,
+        line_smoothing=0.0,  # No smoothing for clearer data visualization
+    )
+
+    # Log plots to MLflow as a separate "summary" run
+    if plot_paths:
+        timestr = time.strftime("%Y%m%d-%H%M%S")
+
+        with mlflow.start_run(
+            run_name=f"EnhancedPlots-{timestr}", experiment_id=experiment_id
+        ):
+            # Log artifacts
+            for plot_path in plot_paths:
+                mlflow.log_artifact(plot_path, artifact_path)
+
+            # Log metadata
+            mlflow.set_tag("plot_type", "enhanced_loss_plots")
+            mlflow.set_tag("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            mlflow.set_tag("generated_by", os.environ.get("USER", "keirparker"))
+            mlflow.set_tag("runs_visualized", len(run_ids))
+            mlflow.set_tag("is_summary", "true")
+
+            # Log the run IDs that were analyzed
+            mlflow.log_param("analyzed_runs", ",".join(run_ids))
+
+            logger.info(
+                f"Enhanced plots logged to MLflow with run ID: {mlflow.active_run().info.run_id}"
+            )
+
+    return plot_paths
+
+def create_enhanced_visualizations(run_ids, experiment_id, experiment_name):
+    """
+    Create enhanced visualizations for the completed experiment runs.
+
+    Args:
+        run_ids: List of run IDs to visualize
+        experiment_id: MLflow experiment ID
+        experiment_name: Name of the experiment
+    """
+    if not run_ids:
+        logger.warning("No run IDs provided for enhanced visualizations")
+        return
+
+    logger.info("Generating enhanced loss plot visualizations...")
+
+    # Create output directory with timestamp
+    timestr = time.strftime("%Y%m%d-%H%M%S")
+    output_dir = f"plots/enhanced_{experiment_name.replace(' ', '_')}_{timestr}"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Generate and log enhanced plots
+    plots = log_enhanced_plots_to_mlflow(
+        experiment_id=experiment_id,
+        run_ids=run_ids,
+        output_dir=output_dir,
+        artifact_path="enhanced_plots",
+    )
+
+    if plots:
+        logger.info(f"Generated {len(plots)} enhanced visualization plots")
+    else:
+        logger.warning("No enhanced visualization plots were generated")
+
+
 
 
 if __name__ == "__main__":
