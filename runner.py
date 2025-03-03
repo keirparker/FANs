@@ -13,6 +13,7 @@ import os
 import time
 from datetime import datetime
 import json
+import numpy as np
 
 from utils.config_utils import load_config, setup_environment
 from utils.device_utils import select_device
@@ -31,6 +32,15 @@ from utils.visualisation_utils import (
 )
 from src.signal_gen import get_periodic_data
 from src.models import get_model_by_name
+from src.ts_data import get_etth1_data
+
+from src.ts_models import (
+    FANForecaster,
+    FANGatedForecaster,
+    LSTMForecaster,
+    TransformerForecaster
+)
+
 
 
 def setup_logger():
@@ -97,15 +107,35 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                 device = select_device(config)
                 mlflow.log_param("device", device.type)
 
-                # 1. Generate the base dataset + retrieve underlying function
+                is_time_series = dataset_type == "etth1"
+
                 logger.info(f"Generating {dataset_type} dataset...")
-                (t_train, data_train, t_test, data_test, data_config, true_func) = (
-                    get_periodic_data(
-                        periodic_type=dataset_type,
-                        num_train_samples=config["hyperparameters"]["num_samples"],
-                        num_test_samples=config["hyperparameters"]["test_samples"],
+                if is_time_series:
+                    # For ETTh1 time series dataset
+                    seq_len = config["hyperparameters"].get("seq_len", 96)
+                    pred_len = config["hyperparameters"].get("pred_len", 24)
+                    target_col = config["hyperparameters"].get("target_col", "OT")
+
+                    # Get time series data
+                    (t_train, data_train, t_test, data_test, data_config, true_func) = (
+                        get_etth1_data(
+                            seq_len=seq_len, pred_len=pred_len, target_col=target_col
+                        )
                     )
-                )
+                    # Additional logging for time series parameters
+                    mlflow.log_param("seq_len", seq_len)
+                    mlflow.log_param("pred_len", pred_len)
+                    mlflow.log_param("target_col", target_col)
+                    mlflow.set_tag("task_type", "time_series_forecasting")
+                else:
+                    # Original code for synthetic data
+                    (t_train, data_train, t_test, data_test, data_config, true_func) = (
+                        get_periodic_data(
+                            periodic_type=dataset_type,
+                            num_train_samples=config["hyperparameters"]["num_samples"],
+                            num_test_samples=config["hyperparameters"]["test_samples"],
+                        )
+                    )
 
                 # Add the experiment batch name as a tag for grouping
                 experiment_batch = config.get("experiment_name", "FAN_Model_Benchmark")
@@ -118,16 +148,6 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                 device = select_device(config)
                 mlflow.log_param("device", device.type)
 
-                # 1. Generate the base dataset + retrieve underlying function (again)
-                logger.info(f"Generating {dataset_type} dataset...")
-                (t_train, data_train, t_test, data_test, data_config, true_func) = (
-                    get_periodic_data(
-                        periodic_type=dataset_type,
-                        num_train_samples=config["hyperparameters"]["num_samples"],
-                        num_test_samples=config["hyperparameters"]["test_samples"],
-                    )
-                )
-
                 # Log dataset sizes
                 mlflow.log_metric("train_size", len(t_train))
                 mlflow.log_metric("test_size", len(t_test))
@@ -135,14 +155,35 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                 # 2. Apply data transformation if needed
                 if data_version == "original":
                     logger.info("Using original data (no transformation).")
+                    # Replace the noisy data version section with this:
                 elif data_version == "noisy":
                     noise_level = config["hyperparameters"]["noise_level"]
                     logger.info(
                         f"Applying noise (level={noise_level}) to training & test data."
                     )
-                    data_train = add_noise(data_train, noise_level=noise_level)
-                    data_test = add_noise(data_test, noise_level=noise_level)
+
+                    if is_time_series:
+                        # For time series, only add noise to input features, not targets
+                        seq_features_len = seq_len * data_config["input_dim"] if "input_dim" in data_config else data_train.shape[1] - pred_len
+                        data_train_input = data_train[:, :seq_features_len]
+                        data_train_target = data_train[:, seq_features_len:]
+                        data_test_input = data_test[:, :seq_features_len]
+                        data_test_target = data_test[:, seq_features_len:]
+
+                        # Add noise to inputs only
+                        data_train_input = add_noise(data_train_input, noise_level=noise_level)
+                        data_test_input = add_noise(data_test_input, noise_level=noise_level)
+
+                        # Recombine
+                        data_train = np.hstack((data_train_input, data_train_target))
+                        data_test = np.hstack((data_test_input, data_test_target))
+                    else:
+                        # For synthetic data, add noise to everything
+                        data_train = add_noise(data_train, noise_level=noise_level)
+                        data_test = add_noise(data_test, noise_level=noise_level)
+
                     mlflow.log_param("noise_level", noise_level)
+
                 elif data_version == "sparse":
                     sparsity_factor = config["hyperparameters"]["sparsity_factor"]
                     logger.info(f"Making data sparse (factor={sparsity_factor}).")
@@ -167,9 +208,26 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                 validation_split = config["hyperparameters"].get("validation_split", 0.1)
                 mlflow.log_param("validation_split", validation_split)
 
-                # 3. Retrieve & train the model
                 logger.info(f"Initializing model: {model_name}")
-                model = get_model_by_name(model_name)
+
+                # Check if this is a time series model
+                is_ts_model = ("Forecaster" in model_name)
+
+                if is_time_series and is_ts_model:
+                    # For time series models, pass extra parameters
+                    model_kwargs = {
+                        "input_dim": data_config["input_dim"]
+                        if "input_dim" in data_config
+                        else 7,
+                        "seq_len": seq_len,
+                        "pred_len": pred_len,
+                        "hidden_dim": config["hyperparameters"].get("hidden_dim", 64),
+                    }
+                    model = get_model_by_name(model_name, **model_kwargs)
+                else:
+                    # For non-time series models, use standard parameters
+                    model = get_model_by_name(model_name)
+                logger.info(f"Initializing model: {model_name}")
                 model.to(device)
 
                 # Track training start time for performance metrics
@@ -403,7 +461,7 @@ def main():
 
     try:
         # Load and set up the environment
-        config = load_config()
+        config = load_config('configs/ts_config.yml')
         setup_environment(config)
 
         # Get experiment parameters
@@ -484,14 +542,6 @@ def main():
             train_loss_plot = plot_losses_by_epoch_comparison(
                 run_ids=all_run_ids, metric_name="train_loss", include_validation=False
             )
-
-            # # Combined training and validation loss comparison
-            # combined_loss_plot = plot_losses_by_epoch_comparison(
-            #     run_ids=all_run_ids,
-            #     metric_name="train_loss",
-            #     include_validation=False,
-            #     smooth_factor=3,  # Apply some smoothing for better readability
-            # )
 
             # Log the plots to MLflow
             if train_loss_plot:

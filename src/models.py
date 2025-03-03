@@ -497,14 +497,6 @@ class FANPhaseOffsetModelLimited(nn.Module):
 
         return x
 
-import torch
-import torch.nn as nn
-import math
-import logging
-from src.models import register_model
-
-logger = logging.getLogger(__name__)
-
 
 @register_model("FANLayerPhaseOffsetGated")
 class FANLayerPhaseOffsetGated(nn.Module):

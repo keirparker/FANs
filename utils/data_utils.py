@@ -557,16 +557,10 @@ class AdaptiveTimeSeriesDataset(Dataset):
 
 @performance_metrics
 def prepare_data_loaders(
-    t_train: np.ndarray,
-    data_train: np.ndarray,
-    config: Dict[str, Any],
-    t_val: Optional[np.ndarray] = None,
-    data_val: Optional[np.ndarray] = None,
-    device: Optional[torch.device] = None,
-    sampler_type: str = "random"
-) -> Tuple[DataLoader, Optional[DataLoader]]:
+    t_train, data_train, config, t_val=None, data_val=None, device=None
+):
     """
-    Create optimized DataLoaders with advanced batching strategies.
+    Prepare data loaders for training and validation.
 
     Args:
         t_train: Training time points
@@ -575,113 +569,57 @@ def prepare_data_loaders(
         t_val: Validation time points (optional)
         data_val: Validation data values (optional)
         device: PyTorch device (optional)
-        sampler_type: Type of sampling strategy ("random", "weighted", "sequential", "balanced")
 
     Returns:
         tuple: (train_loader, val_loader)
     """
-    # Extract configuration parameters with sensible defaults
     batch_size = config["hyperparameters"].get("batch_size", 64)
-    num_workers = config["hyperparameters"].get("num_workers", min(4, os.cpu_count() or 1))
-    pin_memory = config["hyperparameters"].get("pin_memory", device is not None and device.type == "cuda")
-    persistent_workers = config["hyperparameters"].get("persistent_workers", num_workers > 0)
-    precision = config["hyperparameters"].get("precision", "float32")
-    prefetch_factor = config["hyperparameters"].get("prefetch_factor", 2)
-    drop_last = config["hyperparameters"].get("drop_last", False)
-
-    # Convert precision string to torch dtype
-    torch_precision = {
-        "float32": torch.float32,
-        "float64": torch.float64,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16
-    }.get(precision, torch.float32)
-
-    # Ensure batch size fits the data
     batch_size = min(batch_size, len(t_train))
 
-    # Create train dataset with advanced features
-    augmentations = [
-        {'type': 'noise', 'level': 0.03},
-        {'type': 'scale', 'factor': 1.0, 'std': 0.1},
-        {'type': 'shift', 'amount': 0.0, 'std': 0.1}
-    ] if config["hyperparameters"].get("use_augmentation", False) else None
+    # Handle time series data - don't unsqueeze if it's multi-dimensional
+    is_time_series = config.get("dataset_type") == "etth1"
 
-    train_dataset = AdaptiveTimeSeriesDataset(
-        t_train, data_train,
-        precision=torch_precision,
-        device=device,
-        augmentations=augmentations
-    )
+    # Convert to PyTorch tensors
+    x_tensor = torch.from_numpy(t_train).float()
+    if x_tensor.dim() == 1:  # Only add dimension if vector
+        x_tensor = x_tensor.unsqueeze(-1)
 
-    # Create train sampler based on specified strategy
-    if sampler_type == "weighted":
-        # Weight samples by gradient magnitude (focus on difficult regions)
-        gradients = np.abs(np.diff(data_train, prepend=data_train[0]))
-        weights = torch.tensor(gradients, dtype=torch.float32)
-        train_sampler = torch.utils.data.WeightedRandomSampler(
-            weights=weights,
-            num_samples=len(weights),
-            replacement=True
-        )
-    elif sampler_type == "balanced":
-        # Create bins and balance sampling across them
-        n_bins = 10
-        data_range = np.ptp(data_train)
-        bin_width = data_range / n_bins if data_range > 0 else 1.0
-        bin_indices = np.minimum(n_bins-1, np.floor((data_train - np.min(data_train)) / bin_width)).astype(int)
+    y_tensor = torch.from_numpy(data_train).float()
+    if y_tensor.dim() == 1:  # Only add dimension if vector
+        y_tensor = y_tensor.unsqueeze(-1)
 
-        # Count samples per bin
-        bin_counts = np.bincount(bin_indices, minlength=n_bins)
-        bin_weights = 1.0 / (bin_counts + 1)
+    if device is not None:
+        x_tensor = x_tensor.to(device)
+        y_tensor = y_tensor.to(device)
 
-        # Assign weights to samples based on their bin
-        weights = torch.tensor([bin_weights[b] for b in bin_indices], dtype=torch.float32)
-        train_sampler = torch.utils.data.WeightedRandomSampler(
-            weights=weights,
-            num_samples=len(weights),
-            replacement=True
-        )
-    elif sampler_type == "sequential":
-        train_sampler = SequentialSampler(train_dataset)
-    else:  # Default to random sampling
-        train_sampler = torch.utils.data.RandomSampler(train_dataset)
-
-    # Create optimized DataLoader with advanced features
-    train_loader = DataLoader(
+    train_dataset = torch.utils.data.TensorDataset(x_tensor, y_tensor)
+    train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size,
-        sampler=train_sampler,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=persistent_workers,
-        prefetch_factor=prefetch_factor,
-        drop_last=drop_last
+        shuffle=True,
+        num_workers=config["hyperparameters"].get("num_workers", 0),
     )
 
-    # Create validation loader if data is provided
     val_loader = None
     if t_val is not None and data_val is not None:
-        val_dataset = AdaptiveTimeSeriesDataset(
-            t_val, data_val,
-            precision=torch_precision,
-            device=device,
-            augmentations=None  # No augmentation for validation
-        )
+        x_val_tensor = torch.from_numpy(t_val).float()
+        if x_val_tensor.dim() == 1:  # Only add dimension if vector
+            x_val_tensor = x_val_tensor.unsqueeze(-1)
 
-        val_loader = DataLoader(
+        y_val_tensor = torch.from_numpy(data_val).float()
+        if y_val_tensor.dim() == 1:  # Only add dimension if vector
+            y_val_tensor = y_val_tensor.unsqueeze(-1)
+
+        if device is not None:
+            x_val_tensor = x_val_tensor.to(device)
+            y_val_tensor = y_val_tensor.to(device)
+
+        val_dataset = torch.utils.data.TensorDataset(x_val_tensor, y_val_tensor)
+        val_loader = torch.utils.data.DataLoader(
             val_dataset,
             batch_size=batch_size,
-            shuffle=False,  # No shuffling for validation
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=persistent_workers
+            shuffle=False,
+            num_workers=config["hyperparameters"].get("num_workers", 0),
         )
-
-    # Return statistics about the datasets
-    train_stats = train_dataset.statistics()
-    logger.debug(f"Train dataset stats: x_mean={train_stats['x_stats']['mean']:.3f}, "
-                f"y_mean={train_stats['y_stats']['mean']:.3f}, "
-                f"y_std={train_stats['y_stats']['std']:.3f}")
 
     return train_loader, val_loader
