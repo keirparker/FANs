@@ -164,14 +164,28 @@ def load_ts_dataset(
     # Store original timestamps in data_config for reference
     data_info["original_timestamps"] = {"train": t_train, "test": t_test}
 
+    # Calculate actual flattened input dimension
+    flattened_input_dim = seq_len * x_train.shape[2]
+    
     # Flatten inputs and concatenate with targets
-    data_train = np.hstack((x_train.reshape(x_train.shape[0], -1), y_train))
-    data_test = np.hstack((x_test.reshape(x_test.shape[0], -1), y_test))
+    # Ensure consistent flattening shape for model compatibility
+    data_train = np.hstack((x_train.reshape(x_train.shape[0], flattened_input_dim), y_train))
+    data_test = np.hstack((x_test.reshape(x_test.shape[0], flattened_input_dim), y_test))
+    
+    # Verify input dimensions for debugging
+    logger.info(f"Original input shape: {x_train.shape}")
+    logger.info(f"Flattened input dimension: {flattened_input_dim}")
+    logger.info(f"Target shape: {y_train.shape}")
+    logger.info(f"Final data shape: train={data_train.shape}, test={data_test.shape}")
+    
+    # Make sure data_config contains the correct flattened input dimension
+    data_info["flattened_input_dim"] = flattened_input_dim
 
     # Create config with all relevant information
     data_config = {
         **hp,  # Include all hyperparameters
-        "input_dim": x_train.shape[2],  # Number of features
+        "input_dim": x_train.shape[2],  # Original number of features per timestep
+        "flattened_input_dim": flattened_input_dim,  # Total input dimension after flattening
         "seq_len": seq_len,
         "pred_len": pred_len,
         "target_col": target_col,

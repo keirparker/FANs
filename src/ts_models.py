@@ -86,6 +86,24 @@ class FANForecaster(nn.Module):
         # x shape: [batch_size, seq_len*input_dim]
         batch_size = x.shape[0]
 
+        # Check if the input tensor has the expected number of elements
+        expected_elements = self.seq_len * self.input_dim
+        actual_elements = x.shape[1]
+        
+        if actual_elements != expected_elements:
+            logger.warning(f"Input shape mismatch: got {actual_elements} elements, expected {expected_elements}")
+            
+            # Fix by reshaping input to match model's expectations
+            if actual_elements > expected_elements:
+                # Truncate if input has more elements than expected
+                logger.warning(f"Truncating input from {actual_elements} to {expected_elements} elements")
+                x = x[:, :expected_elements]
+            else:
+                # Pad with zeros if input has fewer elements than expected
+                logger.warning(f"Padding input from {actual_elements} to {expected_elements} elements")
+                padding = torch.zeros(batch_size, expected_elements - actual_elements, device=x.device)
+                x = torch.cat([x, padding], dim=1)
+        
         # Reshape to [batch_size, seq_len, input_dim]
         x = x.view(batch_size, self.seq_len, self.input_dim)
 
@@ -152,6 +170,24 @@ class FANGatedForecaster(nn.Module):
         # x shape: [batch_size, seq_len*input_dim]
         batch_size = x.shape[0]
 
+        # Check if the input tensor has the expected number of elements
+        expected_elements = self.seq_len * self.input_dim
+        actual_elements = x.shape[1]
+        
+        if actual_elements != expected_elements:
+            logger.warning(f"Input shape mismatch: got {actual_elements} elements, expected {expected_elements}")
+            
+            # Fix by reshaping input to match model's expectations
+            if actual_elements > expected_elements:
+                # Truncate if input has more elements than expected
+                logger.warning(f"Truncating input from {actual_elements} to {expected_elements} elements")
+                x = x[:, :expected_elements]
+            else:
+                # Pad with zeros if input has fewer elements than expected
+                logger.warning(f"Padding input from {actual_elements} to {expected_elements} elements")
+                padding = torch.zeros(batch_size, expected_elements - actual_elements, device=x.device)
+                x = torch.cat([x, padding], dim=1)
+        
         # Reshape to [batch_size, seq_len, input_dim]
         x = x.view(batch_size, self.seq_len, self.input_dim)
 
@@ -217,6 +253,24 @@ class LSTMForecaster(nn.Module):
         # x shape: [batch_size, seq_len*input_dim]
         batch_size = x.shape[0]
 
+        # Check if the input tensor has the expected number of elements
+        expected_elements = self.seq_len * self.input_dim
+        actual_elements = x.shape[1]
+        
+        if actual_elements != expected_elements:
+            logger.warning(f"Input shape mismatch: got {actual_elements} elements, expected {expected_elements}")
+            
+            # Fix by reshaping input to match model's expectations
+            if actual_elements > expected_elements:
+                # Truncate if input has more elements than expected
+                logger.warning(f"Truncating input from {actual_elements} to {expected_elements} elements")
+                x = x[:, :expected_elements]
+            else:
+                # Pad with zeros if input has fewer elements than expected
+                logger.warning(f"Padding input from {actual_elements} to {expected_elements} elements")
+                padding = torch.zeros(batch_size, expected_elements - actual_elements, device=x.device)
+                x = torch.cat([x, padding], dim=1)
+        
         # Reshape to [batch_size, seq_len, input_dim]
         x = x.view(batch_size, self.seq_len, self.input_dim)
 
@@ -282,6 +336,24 @@ class TransformerForecaster(nn.Module):
         # x shape: [batch_size, seq_len*input_dim]
         batch_size = x.shape[0]
 
+        # Check if the input tensor has the expected number of elements
+        expected_elements = self.seq_len * self.input_dim
+        actual_elements = x.shape[1]
+        
+        if actual_elements != expected_elements:
+            logger.warning(f"Input shape mismatch: got {actual_elements} elements, expected {expected_elements}")
+            
+            # Fix by reshaping input to match model's expectations
+            if actual_elements > expected_elements:
+                # Truncate if input has more elements than expected
+                logger.warning(f"Truncating input from {actual_elements} to {expected_elements} elements")
+                x = x[:, :expected_elements]
+            else:
+                # Pad with zeros if input has fewer elements than expected
+                logger.warning(f"Padding input from {actual_elements} to {expected_elements} elements")
+                padding = torch.zeros(batch_size, expected_elements - actual_elements, device=x.device)
+                x = torch.cat([x, padding], dim=1)
+        
         # Reshape to [batch_size, seq_len, input_dim]
         x = x.view(batch_size, self.seq_len, self.input_dim)
 

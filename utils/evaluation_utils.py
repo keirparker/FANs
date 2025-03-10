@@ -202,7 +202,8 @@ def compare_models(run_ids=None, experiment_id=None, metric="test_r2", output_di
 def generate_model_summary_table(run_ids, experiment_name):
     """
     Generate a summary table of model performance and log it to MLflow
-    under the same experiment as the runs.
+    under the same experiment as the runs. Includes dataset and data_type columns
+    and groups results by these fields.
 
     Args:
         run_ids: List of MLflow run IDs

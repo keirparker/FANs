@@ -34,3 +34,10 @@ logging:
   level: "INFO"  # Could be DEBUG, INFO, WARNING, ERROR, etc.
 
 random_seed: 42
+
+# Visualization settings
+visualization:
+  offset_loss: True  # Enable tracking and plotting of phase offset parameters
+  plot_offset_convergence: True  # Generate convergence plot for all offset parameters
+  zoom_y_axis: True  # Zoom y-axis to actual data range on offset plots
+  add_reference_lines: False  # Don't add reference lines for π/4, π/2, etc.

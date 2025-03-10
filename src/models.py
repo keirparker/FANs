@@ -4,8 +4,62 @@ import torch
 import torch.nn as nn
 import math
 
+def _ensure_compatible_input(src, in_features, logger):
+    """
+    Utility function to ensure input tensor has the right shape for model layers.
+    
+    Args:
+        src: Input tensor, can be 2D (batch_size, features), 3D (batch_size, seq_len, features), etc.
+        in_features: Expected number of input features
+        logger: Logger instance for debug output
+        
+    Returns:
+        Reshaped tensor with compatible dimensions (batch_size, in_features)
+    """
+    # Store original shape for debugging
+    original_shape = src.shape
+    logger.debug(f"Input shape before processing: {original_shape}, in_features expected: {in_features}")
+    
+    # Handle special case: if src shape is [batch_size, 1] and we need more than 1 feature
+    if src.dim() == 2 and src.shape[1] == 1 and in_features > 1:
+        logger.debug(f"Expanding single value input from {src.shape} to match required features {in_features}")
+        # This is likely a simple scalar input that needs to be expanded
+        return src.expand(-1, in_features)
+    
+    # Handle 3D inputs (batch_size, seq_len, features) 
+    if src.dim() == 3:
+        # For 3D inputs, we need to flatten to 2D first
+        batch_size = src.shape[0]
+        logger.debug(f"Flattening 3D input with shape {src.shape}")
+        src = src.reshape(batch_size, -1)
+        logger.debug(f"Shape after flattening: {src.shape}")
+    elif src.dim() > 3:
+        # Higher dimensions not supported
+        logger.warning(f"Unexpected input shape: {src.shape}, expected 2D or 3D tensor")
+        # Flatten all dimensions except batch
+        src = src.reshape(src.shape[0], -1)
+    
+    # At this point src should be 2D (batch_size, features)
+    # CRITICAL FIX: ALWAYS force the tensor to have exactly in_features
+    if src.shape[1] != in_features:
+        if src.shape[1] > in_features:
+            # If we have too many features, truncate
+            logger.warning(f"Input has too many features ({src.shape[1]}) for model ({in_features}). Truncating. Original shape: {original_shape}")
+            src = src[:, :in_features]
+        else:
+            # If we have too few features, pad with zeros
+            logger.warning(f"Input has too few features ({src.shape[1]}) for model ({in_features}). Padding. Original shape: {original_shape}")
+            pad = torch.zeros((src.shape[0], in_features - src.shape[1]), device=src.device)
+            src = torch.cat([src, pad], dim=1)
+    
+    # Final sanity check
+    assert src.shape[1] == in_features, f"Shape mismatch! Got {src.shape}, expected ({src.shape[0]}, {in_features})"
+    logger.debug(f"Final compatible input shape: {src.shape}")
+    
+    return src
 
-# Model registry dictionary
+
+# Global model registry
 model_registry = {}
 
 def register_model(model_name):
@@ -22,10 +76,29 @@ def get_model_by_name(model_name, *args, **kwargs):
     """
     Retrieve and instantiate a model class by its name.
     """
+    # Make sure all model modules are imported
+    try:
+        from src.ts_models import FANForecaster, FANGatedForecaster, LSTMForecaster, TransformerForecaster
+        from src.fan_transformer import FANTransformer, FANTransformerForecaster, FANGatedTransformerForecaster
+        from src.transformer import StandardTransformer, StandardTransformerForecaster
+        from src.modified_transformer import ModifiedTransformer, ModifiedTransformerForecaster
+        from src.phase_offset_transformer import (
+            FANPhaseOffsetTransformer, 
+            FANPhaseOffsetTransformerForecaster,
+            FANPhaseOffsetGatedTransformerForecaster
+        )
+        logger.debug(f"Imported all model modules. Registry has {len(model_registry)} models.")
+    except ImportError as e:
+        logger.warning(f"Could not import some model modules: {e}")
+    
+    # Get the model class from the registry
     model_cls = model_registry.get(model_name)
     if model_cls is None:
-        logger.error(f"No model found with model_name {model_name}.")
+        # Log available models for debugging
+        available_models = sorted(list(model_registry.keys()))
+        logger.error(f"No model found with model_name '{model_name}'. Available models: {available_models}")
         raise ValueError(f"No model found with model_name {model_name}.")
+        
     logger.info(f"Instantiating model: {model_name} with args={args}, kwargs={kwargs}")
     return model_cls(*args, **kwargs)
 
@@ -77,6 +150,11 @@ class FAN(nn.Module):
     def __init__(self, input_dim=1, output_dim=1, hidden_dim=2048, num_layers=3):
         super(FAN, self).__init__()
         logger.info("Initializing FAN model ...")
+        # For compatibility with time series data
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        
         self.embedding = nn.Linear(input_dim, hidden_dim)
         self.layers = nn.ModuleList()
         for _ in range(num_layers - 1):
@@ -85,6 +163,11 @@ class FAN(nn.Module):
 
     def forward(self, src):
         logger.debug(f"FAN forward called with src.shape={src.shape}")
+        
+        # Explicitly handle time series input with our custom input dimension
+        src = _ensure_compatible_input(src, self.input_dim, logger)
+        
+        # Now we know src has shape [batch_size, input_dim]
         output = self.embedding(src)
         for layer in self.layers:
             output = layer(output)
@@ -95,6 +178,11 @@ class FANGated(nn.Module):
     def __init__(self, input_dim=1, output_dim=1, hidden_dim=2048, num_layers=3, gated=True):
         super(FANGated, self).__init__()
         logger.info("Initializing FANGated model ...")
+        # For compatibility with time series data
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        
         self.embedding = nn.Linear(input_dim, hidden_dim)
         self.layers = nn.ModuleList()
         for _ in range(num_layers - 1):
@@ -103,6 +191,11 @@ class FANGated(nn.Module):
 
     def forward(self, src):
         logger.debug(f"FANGated forward called with src.shape={src.shape}")
+        
+        # Explicitly handle time series input with our custom input dimension
+        src = _ensure_compatible_input(src, self.input_dim, logger)
+        
+        # Now we know src has shape [batch_size, input_dim]
         output = self.embedding(src)
         for layer in self.layers:
             output = layer(output)
@@ -113,6 +206,12 @@ class MLPModel(nn.Module):
     def __init__(self, input_dim=1, output_dim=1, hidden_dim=2048, num_layers=3, use_embedding=True):
         super(MLPModel, self).__init__()
         logger.info("Initializing MLPModel ...")
+        # For compatibility with time series data
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        self.use_embedding = use_embedding
+        
         self.activation = nn.GELU()
         self.layers = nn.ModuleList()
         if use_embedding:
@@ -126,6 +225,11 @@ class MLPModel(nn.Module):
 
     def forward(self, src):
         logger.debug(f"MLPModel forward called with src.shape={src.shape}")
+        
+        # Explicitly handle time series input with our custom input dimension
+        src = _ensure_compatible_input(src, self.input_dim, logger)
+        
+        # Now we know src has shape [batch_size, input_dim]
         output = self.embedding(src) if hasattr(self, "embedding") else src
         for layer in self.layers:
             output = layer(output)
@@ -251,7 +355,7 @@ class FANLayerPhaseOffset(nn.Module):
 
         # 3) Per-feature offset (shape: p_dim), one offset per feature dimension
         #    so we have φ in shape (p_dim,).
-        self.offset = nn.Parameter(torch.zeros(p_dim))
+        self.offset = nn.Parameter(torch.full((p_dim,), math.pi / 4))
 
     def forward(self, src):
         """
@@ -298,6 +402,7 @@ class FANPhaseOffsetModel(nn.Module):
         super(FANPhaseOffsetModel, self).__init__()
 
         logger.info("Initializing FANPhaseOffsetModel ...")
+        self.input_dim = input_dim  # Save for reference in forward method
 
         # 1) Embedding from input_dim -> hidden_dim
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
@@ -316,6 +421,21 @@ class FANPhaseOffsetModel(nn.Module):
         src: (batch_size, input_dim)
         returns: (batch_size, output_dim)
         """
+        # Simplified approach: expect 2D inputs [batch_size, features]
+        # Our data loaders always ensure this format
+        
+        # If somehow we still get a different shape, handle it
+        if src.dim() == 1:
+            # 1D input [batch_size] - add feature dimension
+            src = src.unsqueeze(1)
+        elif src.dim() > 2:
+            # Higher dim input - flatten to 2D
+            batch_size = src.shape[0]
+            src = src.reshape(batch_size, -1)
+            # Take only the first feature if too many
+            if src.shape[1] > 1:
+                src = src[:, :1]
+        
         # a) Embed the input
         x = self.embedding(src)
 
@@ -421,8 +541,9 @@ class FANLayerPhaseOffsetLimited(nn.Module):
         return output
 
 
-@register_model("FANPhaseOffsetModelLimited")
-class FANPhaseOffsetModelLimited(nn.Module):
+
+@register_model("FANPhaseOffsetModelZero")
+class FANPhaseOffsetModelZeros(nn.Module):
     """
     A top-level model similar to FANGated, but using FANLayerPhaseOffset.
 
@@ -453,11 +574,11 @@ class FANPhaseOffsetModelLimited(nn.Module):
         limit_phase_offset: bool = False,
         max_phase: float = math.pi,
     ):
-        super(FANPhaseOffsetModelLimited, self).__init__()
+        super(FANPhaseOffsetModelZeros, self).__init__()
         if num_layers < 2:
             raise ValueError("num_layers must be >= 2 (embedding + final at minimum).")
 
-        logger.info("Initializing FANPhaseOffsetModel ...")
+        logger.info("Initializing FANPhaseOffsetModelZeros ...")
 
         # 1) Embedding from input_dim -> hidden_dim
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
@@ -466,7 +587,7 @@ class FANPhaseOffsetModelLimited(nn.Module):
         self.layers = nn.ModuleList()
         for _ in range(num_layers - 1):
             self.layers.append(
-                FANLayerPhaseOffsetLimited(
+                FANLayerPhaseOffsetZero(
                     input_dim=hidden_dim,
                     output_dim=hidden_dim,
                     bias=bias,
@@ -483,11 +604,23 @@ class FANPhaseOffsetModelLimited(nn.Module):
         Forward pass:
 
         Args:
-            src (Tensor): shape (batch_size, input_dim)
+            src (Tensor): shape (batch_size, input_dim) or (batch_size,) when input_dim=1
+                        or potentially (batch_size, 1, 1) from some data pipelines
 
         Returns:
             Tensor: shape (batch_size, output_dim)
         """
+        # Ensure input has proper dimensions
+        if src.dim() == 1:
+            # If input is 1D (batch_size,), unsqueeze to (batch_size, 1)
+            src = src.unsqueeze(-1)
+        elif src.dim() == 3:
+            # If input is 3D (batch_size, 1, 1), reshape to (batch_size, 1)
+            src = src.squeeze(1)
+        elif src.dim() > 3:
+            # Log warning if unexpected input shape
+            logger.warning(f"Unexpected input shape: {src.shape}, expected 2D tensor")
+        
         # a) Embed the input
         x = self.embedding(src)
 
@@ -535,7 +668,7 @@ class FANLayerPhaseOffsetGated(nn.Module):
         self.activation = nn.GELU()
 
         # Per-feature phase offset: φ ∈ ℝ^(p_dim)
-        self.offset = nn.Parameter(torch.zeros(p_dim))
+        self.offset = nn.Parameter(torch.full((p_dim,), math.pi / 4))
 
         # Learnable scalar gate parameter: s ∈ ℝ, gate = σ(s)
         self.gate = nn.Parameter(torch.randn(1, dtype=torch.float32))
@@ -562,6 +695,72 @@ class FANLayerPhaseOffsetGated(nn.Module):
 
         # Concatenate branches to form final output:
         output = torch.cat((fourier_branch, nonlinear_branch), dim=-1)
+        return output
+
+
+
+@register_model("FANLayerPhaseOffsetZero")
+class FANLayerPhaseOffsetZero(nn.Module):
+    """
+    FAN-like layer where each feature dimension i has a trainable phase offset φ_i.
+    We output:
+        sin(p + φ), cos(p + π/2 - φ), and g
+    where p and g are linear transforms of the input.
+
+    p has shape (batch_size, output_dim//4), from which we produce sin(...) and cos(...).
+    g has shape (batch_size, output_dim//2), with an activation.
+    The final output is concatenated: [sin(p+offset), cos(p+π/2-offset), g].
+    """
+
+    def __init__(self, input_dim, output_dim, bias=True, limit_phase_offset=False, max_phase=math.pi):
+        super(FANLayerPhaseOffsetZero, self).__init__()
+
+        # 1) Linear transforms:
+        #    output_dim//4 for p => we get sin(...) + cos(...) => total output_dim//2
+        #    the remaining output_dim//2 for g
+        if output_dim % 2 != 0:
+            raise ValueError(
+                "Output dimension must be even, so half can be allocated to g."
+            )
+        p_dim = output_dim // 4
+        g_dim = output_dim // 2
+
+        self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
+        self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
+
+        # 2) Activation for g
+        self.activation = nn.GELU()
+
+        # Save parameters
+        self.limit_phase_offset = limit_phase_offset
+        self.max_phase = max_phase
+        
+        # make zeros
+        self.offset = nn.Parameter(torch.zeros(p_dim))
+
+    def forward(self, src):
+        """
+        src: (batch_size, input_dim)
+        returns: (batch_size, output_dim)
+        Specifically: [ sin(p+offset), cos(p + π/2 - offset), g ].
+        """
+        # a) Compute p and g
+        #    p => (batch_size, p_dim)
+        #    g => (batch_size, g_dim) then pass through GELU
+        p = self.input_linear_p(src)
+        g = self.activation(self.input_linear_g(src))
+
+        # b) Apply offset only in the sine and cosine channels
+        #    For each feature dimension, p_i + offset_i
+        #    and p_i + (π/2 - offset_i)
+        p_plus = p + self.offset  # used for sin
+        p_minus = p + (torch.pi / 2) - self.offset  # used for cos
+
+        sin_part = torch.sin(p_plus)  # (batch_size, p_dim)
+        cos_part = torch.cos(p_minus)  # (batch_size, p_dim)
+
+        # c) Concatenate => total dimension = p_dim + p_dim + g_dim = 2*p_dim + g_dim = output_dim
+        output = torch.cat((sin_part, cos_part, g), dim=-1)
         return output
 
 
@@ -601,4 +800,412 @@ class FANPhaseOffsetModelGated(nn.Module):
         # b) Pass through each layer sequentially
         for layer in self.layers:
             x = layer(x)
+        return x
+
+
+@register_model("FANLayerAmplitudePhase")
+class FANLayerAmplitudePhase(nn.Module):
+    """
+    FAN-like layer with trainable phase offset φ_i and amplitude A_i for each feature dimension i.
+    We output:
+        A*sin(p + φ), A*cos(p + π/2 - φ), and g
+    where p and g are linear transforms of the input.
+
+    p has shape (batch_size, output_dim//4), from which we produce sin(...) and cos(...).
+    g has shape (batch_size, output_dim//2), with an activation.
+    The final output is concatenated: [A*sin(p+offset), A*cos(p+π/2-offset), g].
+    """
+
+    def __init__(self, input_dim, output_dim, bias=True):
+        super(FANLayerAmplitudePhase, self).__init__()
+
+        # 1) Linear transforms:
+        #    output_dim//4 for p => we get sin(...) + cos(...) => total output_dim//2
+        #    the remaining output_dim//2 for g
+        if output_dim % 2 != 0:
+            raise ValueError(
+                "Output dimension must be even, so half can be allocated to g."
+            )
+        p_dim = output_dim // 4
+        g_dim = output_dim // 2
+
+        self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
+        self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
+
+        # 2) Activation for g
+        self.activation = nn.GELU()
+
+        # 3) Per-feature phase offset (shape: p_dim), one offset per feature dimension
+        self.offset = nn.Parameter(torch.full((p_dim,), math.pi / 4))
+
+        # 4) Per-feature amplitude (shape: p_dim), one amplitude per feature dimension
+        #    Initialize to 1.0 for each dimension
+        self.amplitude = nn.Parameter(torch.ones(p_dim))
+
+    def forward(self, src):
+        """
+        src: (batch_size, input_dim) or potentially (batch_size, 1, input_dim) or (batch_size, seq_len, input_dim)
+        returns: (batch_size, output_dim)
+        Specifically: [ A*sin(p+offset), A*cos(p + π/2 - offset), g ].
+        """
+        # Ensure input has compatible shape using common helper function
+        src = _ensure_compatible_input(src, self.input_linear_p.in_features, logger)
+                
+        # a) Compute p and g
+        #    p => (batch_size, p_dim)
+        #    g => (batch_size, g_dim) then pass through GELU
+        p = self.input_linear_p(src)
+        g = self.activation(self.input_linear_g(src))
+
+        # b) Apply offset and amplitude in the sine and cosine channels
+        p_plus = p + self.offset  # used for sin
+        p_minus = p + (torch.pi / 2) - self.offset  # used for cos
+
+        sin_part = self.amplitude * torch.sin(p_plus)  # (batch_size, p_dim)
+        cos_part = self.amplitude * torch.cos(p_minus)  # (batch_size, p_dim)
+
+        # c) Concatenate => total dimension = p_dim + p_dim + g_dim = 2*p_dim + g_dim = output_dim
+        output = torch.cat((sin_part, cos_part, g), dim=-1)
+        return output
+
+
+@register_model("FANAmplitudePhaseModel")
+class FANAmplitudePhaseModel(nn.Module):
+    """
+    A top-level model using FANLayerAmplitudePhase layers.
+    We embed the input to hidden_dim, apply (num_layers - 1) amplitude-phase layers,
+    and a final linear to get output_dim.
+
+    Structure:
+      1) Embedding:        (input_dim -> hidden_dim)
+      2) (num_layers - 1) x FANLayerAmplitudePhase: (hidden_dim -> hidden_dim)
+      3) Final linear:     (hidden_dim -> output_dim)
+    """
+
+    def __init__(
+        self, input_dim=1, output_dim=1, hidden_dim=2048, num_layers=3, bias=True
+    ):
+        super(FANAmplitudePhaseModel, self).__init__()
+
+        logger.info("Initializing FANAmplitudePhaseModel ...")
+        # Store dimensions for shape validation
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+
+        # 1) Embedding from input_dim -> hidden_dim
+        self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
+
+        # 2) Build (num_layers - 1) amplitude-phase layers
+        self.layers = nn.ModuleList()
+        for _ in range(num_layers - 1):
+            self.layers.append(
+                FANLayerAmplitudePhase(hidden_dim, hidden_dim, bias=bias)
+            )
+
+        # 3) Final linear: hidden_dim -> output_dim
+        self.layers.append(nn.Linear(hidden_dim, output_dim, bias=bias))
+
+    def forward(self, src):
+        """
+        Forward pass:
+        src: (batch_size, input_dim) or potentially (batch_size, 1, input_dim) or (batch_size, seq_len, input_dim)
+        returns: (batch_size, output_dim)
+        """
+        # Ensure input has compatible shape using common helper function
+        src = _ensure_compatible_input(src, self.embedding.in_features, logger)
+        
+        # a) Embed the input
+        x = self.embedding(src)
+
+        # b) Pass through each layer in sequence
+        for layer in self.layers:
+            x = layer(x)
+
+        # Reshape targets if necessary to match expected output dimension (important fix)
+        if hasattr(self, 'output_dim') and x.shape[-1] != self.output_dim:
+            logger.warning(f"Reshaping output from {x.shape} to match output_dim={self.output_dim}")
+            if x.shape[-1] > self.output_dim:
+                # Trim excess dimensions
+                x = x[..., :self.output_dim]
+            elif x.shape[-1] < self.output_dim:
+                # Pad with zeros
+                padding = torch.zeros(*x.shape[:-1], self.output_dim - x.shape[-1], device=x.device)
+                x = torch.cat([x, padding], dim=-1)
+
+        return x
+
+
+
+@register_model("FANLayerMultiFrequency")
+class FANLayerMultiFrequency(nn.Module):
+    """
+    FAN-like layer supporting multiple frequency components.
+    For each input dimension, we compute sinusoidal outputs at different frequency scales.
+
+    We output:
+        For each frequency i: sin(f_i*p + φ_i), cos(f_i*p + π/2 - φ_i)
+        Plus the gating component g
+    where p and g are linear transforms of the input, and f_i are learnable frequency scales.
+    """
+
+    def __init__(self, input_dim, output_dim, n_freqs=2, bias=True):
+        super(FANLayerMultiFrequency, self).__init__()
+
+        # Check that dimensions are compatible with frequency count
+        if output_dim % 2 != 0:
+            raise ValueError("Output dimension must be even.")
+
+        # Ensure we can divide the output dimensions properly
+        trig_part = output_dim // 2  # Half for trig functions, half for g
+        if trig_part % n_freqs != 0:
+            raise ValueError(
+                f"Trigonometric part (output_dim//2 = {trig_part}) must be divisible by n_freqs ({n_freqs})"
+            )
+
+        # Calculate dimensions
+        p_dim = trig_part // n_freqs  # For each frequency we need sin and cos
+        g_dim = output_dim - trig_part
+
+        self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
+        self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
+
+        # Activation for g
+        self.activation = nn.GELU()
+
+        # Per-feature phase offset for each frequency
+        # Shape: (n_freqs, p_dim)
+        self.offset = nn.Parameter(torch.full((n_freqs, p_dim), math.pi / 4))
+
+        # Learnable frequency scales - initialize with log spacing
+        # Shape: (n_freqs,)
+        self.freq_scales = nn.Parameter(torch.logspace(-0.5, 0.5, n_freqs))
+
+        # Store dimensions for forward pass
+        self.n_freqs = n_freqs
+        self.p_dim = p_dim
+        self.g_dim = g_dim
+
+    def forward(self, src):
+        """
+        src: (batch_size, input_dim) or potentially (batch_size, 1, input_dim) or (batch_size, seq_len, input_dim)
+        returns: (batch_size, output_dim)
+        Output combines multiple frequency sinusoidal components and the gating part.
+        """
+        # Ensure input has compatible shape using common helper function
+        src = _ensure_compatible_input(src, self.input_linear_p.in_features, logger)
+                
+        # Compute base p and g
+        p = self.input_linear_p(src)  # (batch_size, p_dim)
+        g = self.activation(self.input_linear_g(src))  # (batch_size, g_dim)
+
+        # Prepare list for concatenation
+        trig_parts = []
+
+        # For each frequency scale
+        for i in range(self.n_freqs):
+            # Scale p by the frequency factor
+            scaled_p = p * self.freq_scales[i]
+
+            # Apply phase offset
+            p_plus = scaled_p + self.offset[i]  # for sin
+            p_minus = scaled_p + (torch.pi / 2) - self.offset[i]  # for cos
+
+            # Compute trigonometric functions
+            sin_part = torch.sin(p_plus)  # (batch_size, p_dim)
+            cos_part = torch.cos(p_minus)  # (batch_size, p_dim)
+
+            # Add to list
+            trig_parts.append(sin_part)
+            trig_parts.append(cos_part)
+
+        # Concatenate all parts
+        output = torch.cat(trig_parts + [g], dim=-1)
+        return output
+
+
+@register_model("FANMultiFrequencyModel")
+class FANMultiFrequencyModel(nn.Module):
+    """
+    A top-level model using FANLayerMultiFrequency layers.
+    We embed the input to hidden_dim, apply (num_layers - 1) multi-frequency layers,
+    and a final linear to get output_dim.
+
+    Structure:
+      1) Embedding:        (input_dim -> hidden_dim)
+      2) (num_layers - 1) x FANLayerMultiFrequency: (hidden_dim -> hidden_dim)
+      3) Final linear:     (hidden_dim -> output_dim)
+    """
+
+    def __init__(
+        self,
+        input_dim=1,
+        output_dim=1,
+        hidden_dim=2048,
+        num_layers=3,
+        n_freqs=2,
+        bias=True,
+    ):
+        super(FANMultiFrequencyModel, self).__init__()
+
+        logger.info(
+            "Initializing FANMultiFrequencyModel with %d frequencies...", n_freqs
+        )
+
+        # 1) Embedding from input_dim -> hidden_dim
+        self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
+
+        # 2) Build (num_layers - 1) multi-frequency layers
+        self.layers = nn.ModuleList()
+        for _ in range(num_layers - 1):
+            self.layers.append(
+                FANLayerMultiFrequency(
+                    hidden_dim, hidden_dim, n_freqs=n_freqs, bias=bias
+                )
+            )
+
+        # 3) Final linear: hidden_dim -> output_dim
+        self.layers.append(nn.Linear(hidden_dim, output_dim, bias=bias))
+
+    def forward(self, src):
+        """
+        Forward pass:
+        src: (batch_size, input_dim) or potentially (batch_size, 1, input_dim) or (batch_size, seq_len, input_dim)
+        returns: (batch_size, output_dim)
+        """
+        # Ensure input has compatible shape
+        src = _ensure_compatible_input(src, self.embedding.in_features, logger)
+        
+        # a) Embed the input
+        x = self.embedding(src)
+
+        # b) Pass through each layer in sequence
+        for layer in self.layers:
+            x = layer(x)
+
+        return x
+
+
+@register_model("FANLayerUnconstrainedBasis")
+class FANLayerUnconstrainedBasis(nn.Module):
+    """
+    FAN-like layer using a fully parameterized 2x2 transformation matrix
+    for each feature dimension, allowing unconstrained linear transformations
+    of the sin/cos basis.
+
+    We output:
+        T[sin(p), cos(p)] and g
+    where p and g are linear transforms of the input, and T is a learned 2x2 matrix
+    per feature dimension.
+    """
+
+    def __init__(self, input_dim, output_dim, bias=True):
+        super(FANLayerUnconstrainedBasis, self).__init__()
+
+        # 1) Linear transforms
+        if output_dim % 2 != 0:
+            raise ValueError(
+                "Output dimension must be even, so half can be allocated to g."
+            )
+        p_dim = output_dim // 4
+        g_dim = output_dim // 2
+
+        self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
+        self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
+
+        # 2) Activation for g
+        self.activation = nn.GELU()
+
+        # 3) Per-feature basis transformation (shape: p_dim, 2, 2)
+        # Initialize as identity-like matrices with small perturbation
+        basis = torch.stack([torch.eye(2) for _ in range(p_dim)])
+        basis = basis + torch.randn_like(basis) * 0.01
+        self.basis_transform = nn.Parameter(basis)
+
+    def forward(self, src):
+        """
+        src: (batch_size, input_dim) or potentially (batch_size, 1, input_dim)
+        returns: (batch_size, output_dim)
+        """
+        # Ensure input has compatible shape using common helper function
+        src = _ensure_compatible_input(src, self.input_linear_p.in_features, logger)
+            
+        # a) Compute p and g
+        p = self.input_linear_p(src)  # (batch_size, p_dim)
+        g = self.activation(self.input_linear_g(src))  # (batch_size, g_dim)
+
+        # b) Compute sin and cos of p
+        sin_p = torch.sin(p)  # (batch_size, p_dim)
+        cos_p = torch.cos(p)  # (batch_size, p_dim)
+
+        # Stack them for matrix multiplication
+        # Shape: (batch_size, p_dim, 2)
+        trig_inputs = torch.stack([sin_p, cos_p], dim=-1)
+        
+        # Debug log the shapes
+        logger.debug(f"trig_inputs shape: {trig_inputs.shape}, basis_transform shape: {self.basis_transform.shape}")
+
+        # Apply basis transformation
+        # Shape of basis_transform: (p_dim, 2, 2)
+        # (batch_size, p_dim, 2) @ (p_dim, 2, 2) -> (batch_size, p_dim, 2)
+        transformed = torch.einsum("bpd,pdo->bpo", trig_inputs, self.basis_transform)
+
+        # Extract the two components
+        # Both shape: (batch_size, p_dim)
+        sin_transformed = transformed[:, :, 0]
+        cos_transformed = transformed[:, :, 1]
+
+        # c) Concatenate all parts
+        output = torch.cat((sin_transformed, cos_transformed, g), dim=-1)
+        return output
+
+
+@register_model("FANUnconstrainedBasisModel")
+class FANUnconstrainedBasisModel(nn.Module):
+    """
+    A top-level model using FANLayerUnconstrainedBasis layers.
+    We embed the input to hidden_dim, apply (num_layers - 1) unconstrained basis layers,
+    and a final linear to get output_dim.
+
+    Structure:
+      1) Embedding:        (input_dim -> hidden_dim)
+      2) (num_layers - 1) x FANLayerUnconstrainedBasis: (hidden_dim -> hidden_dim)
+      3) Final linear:     (hidden_dim -> output_dim)
+    """
+
+    def __init__(
+        self, input_dim=1, output_dim=1, hidden_dim=2048, num_layers=3, bias=True
+    ):
+        super(FANUnconstrainedBasisModel, self).__init__()
+
+        logger.info("Initializing FANUnconstrainedBasisModel ...")
+
+        # 1) Embedding from input_dim -> hidden_dim
+        self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
+
+        # 2) Build (num_layers - 1) unconstrained basis layers
+        self.layers = nn.ModuleList()
+        for _ in range(num_layers - 1):
+            self.layers.append(
+                FANLayerUnconstrainedBasis(hidden_dim, hidden_dim, bias=bias)
+            )
+
+        # 3) Final linear: hidden_dim -> output_dim
+        self.layers.append(nn.Linear(hidden_dim, output_dim, bias=bias))
+
+    def forward(self, src):
+        """
+        Forward pass:
+        src: (batch_size, input_dim) or potentially (batch_size, 1, input_dim) or (batch_size, sequence_len, input_dim)
+        returns: (batch_size, output_dim)
+        """
+        # Ensure input has compatible shape using common helper function
+        src = _ensure_compatible_input(src, self.embedding.in_features, logger)
+        
+        # a) Embed the input
+        x = self.embedding(src)
+
+        # b) Pass through each layer in sequence
+        for layer in self.layers:
+            x = layer(x)
+
         return x

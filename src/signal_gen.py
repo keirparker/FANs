@@ -1,6 +1,12 @@
 import numpy as np
 from loguru import logger
 
+
+def train_domain_x(p, ns):
+    return np.linspace(-5*p, 5*p, ns)
+def test_domain_x(p, ns):
+    return np.linspace(-15*p, 15*p, ns)
+
 ##############################################################################
 # For signals like 'complex_5' that have special logic, we define a helper
 ##############################################################################
@@ -18,6 +24,17 @@ def complex_5_fn(x: np.ndarray) -> np.ndarray:
         data += (1 / n) * sawtooth_wave(n * x, n)
     return data
 
+def complex_exp_freq_fn(x: np.ndarray, N: int = 5) -> np.ndarray:
+    """
+    A sum of sawtooth waves with exponentially increasing frequency.
+    Each term has frequency 2^n for n=1..N.
+    We scale amplitude by 1/n to keep higher-frequency terms from dominating.
+    """
+    data = np.zeros_like(x)
+    for n in range(1, N + 1):
+        freq = 2 ** n  # exponential jump in frequency
+        data += (1.0 / n) * sawtooth_wave(freq * x)
+    return data
 
 ##############################################################################
 # PERIODIC_SPECS holds all domain & data logic for each type.
@@ -26,8 +43,8 @@ def complex_5_fn(x: np.ndarray) -> np.ndarray:
 PERIODIC_SPECS = {
     "sin": {
         "period": 6,
-        "domain_train": lambda p, ns: np.linspace(-4*p*np.pi, 4*p*np.pi, ns),
-        "domain_test":  lambda p, ns: np.linspace(-12*p*np.pi, 12*p*np.pi, ns),
+        "domain_train": train_domain_x,
+        "domain_test": test_domain_x,
         "data_fn":      lambda t: np.sin(t),
         "config": {
             "batchsize": 32,
@@ -41,8 +58,8 @@ PERIODIC_SPECS = {
     },
     "mod": {
         "period": 20,
-        "domain_train": lambda p, ns: np.linspace(-4*p, 4*p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-12*p, 12*p, ns),
+        "domain_train": train_domain_x,
+        "domain_test":  test_domain_x,
         "data_fn":      lambda t: np.mod(t, 5),
         "config": {
             "batchsize": 32,
@@ -56,8 +73,8 @@ PERIODIC_SPECS = {
     },
     "complex_1": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-4*p, 4*p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-12*p, 12*p, ns),
+        "domain_train": train_domain_x,
+        "domain_test":  test_domain_x,
         "data_fn":      lambda t: np.exp(np.sin(np.pi * t)**2 + np.cos(t) + np.mod(t, 3) - 1),
         "config": {
             "batchsize": 32,
@@ -71,8 +88,8 @@ PERIODIC_SPECS = {
     },
     "complex_2": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-4*p, 4*p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-12*p, 12*p, ns),
+        "domain_train": train_domain_x,
+        "domain_test":  test_domain_x,
         "data_fn":      lambda t: (1 + np.sin(t)) * np.sin(2 * t),
         "config": {
             "batchsize": 32,
@@ -86,8 +103,8 @@ PERIODIC_SPECS = {
     },
     "complex_3": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-p, p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-2*p, 2*p, ns),
+        "domain_train": train_domain_x,
+        "domain_test":  test_domain_x,
         "data_fn":      lambda t: np.sin(t + np.sin(2 * t)),
         "config": {
             "batchsize": 32,
@@ -101,8 +118,8 @@ PERIODIC_SPECS = {
     },
     "complex_4": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-p, p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-2*p, 2*p, ns),
+        "domain_train": train_domain_x,
+        "domain_test":  test_domain_x,
         "data_fn":      lambda t: np.sin(t)*(np.cos(2*t)**2) + np.cos(t)*(np.sin(3*t)**2),
         "config": {
             "batchsize": 32,
@@ -116,8 +133,8 @@ PERIODIC_SPECS = {
     },
     "complex_5": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-p, p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-2*p, 2*p, ns),
+        "domain_train": train_domain_x,
+        "domain_test":  test_domain_x,
         "data_fn":      complex_5_fn,  # uses that helper
         "config": {
             "batchsize": 32,
@@ -131,8 +148,8 @@ PERIODIC_SPECS = {
     },
     "complex_6": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-p, p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-2*p, 2*p, ns),
+        "domain_train": train_domain_x,
+        "domain_test":  test_domain_x,
         "data_fn":      lambda t: np.exp(np.sin(t)) / (1 + np.cos(2*t)**2),
         "config": {
             "batchsize": 32,
@@ -144,6 +161,21 @@ PERIODIC_SPECS = {
             "y_lower": 0,
         }
     },
+    "complex_exp_freq" : {
+        "period": 4,
+        "domain_train": train_domain_x,
+        "domain_test":  test_domain_x,
+        "data_fn":      complex_exp_freq_fn,
+        "config": {
+            "batchsize":   32,
+            "numepoch":    10000,
+            "printepoch":  50,
+            "lr":          1e-5,
+            "wd":          0.01,
+            "y_uper":      1,
+            "y_lower":     -1,
+        }
+    }
 }
 
 
