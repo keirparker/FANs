@@ -20,6 +20,12 @@ def select_device(config):
     # Attempt to read device preference from config
     device_str = config["hyperparameters"].get("device", None)
 
+    # Apply CUDA environment variables that might help detection
+    import os
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # Match IDs with nvidia-smi
+    if "CUDA_VISIBLE_DEVICES" not in os.environ:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use first GPU by default
+    
     # Debug CUDA detection issues
     cuda_available = torch.cuda.is_available()
     if cuda_available:
@@ -36,19 +42,48 @@ def select_device(config):
                 logger.info(f"nvidia-smi output:\n{nvidia_smi}")
             except (subprocess.SubprocessError, FileNotFoundError):
                 logger.warning("nvidia-smi command failed or not found")
+            
+            # Try lspci to detect NVIDIA hardware    
+            try:
+                lspci = subprocess.check_output(['lspci', '|', 'grep', 'NVIDIA'], shell=True).decode('utf-8')
+                logger.info(f"lspci NVIDIA devices:\n{lspci}")
+            except:
+                logger.warning("lspci command failed or no NVIDIA devices found")
                 
             # Check if PyTorch was built with CUDA
             logger.info(f"PyTorch CUDA built: {torch.version.cuda is not None}")
             if torch.version.cuda:
                 logger.info(f"PyTorch CUDA version: {torch.version.cuda}")
+                
+            # Report CUDA_HOME and library paths
+            cuda_home = os.environ.get("CUDA_HOME", "not set")
+            logger.info(f"CUDA_HOME: {cuda_home}")
+            logger.info(f"LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', 'not set')}")
         except Exception as e:
             logger.error(f"Error during CUDA debug: {e}")
 
     # Force CUDA on p3.8x EC2 if specified in config
     force_cuda = config.get("force_cuda", False)
     if force_cuda and device_str == "cuda":
-        logger.info("Forcing CUDA device on p3.8x EC2 instance")
+        # Use environment variable to make PyTorch detect CUDA
+        import os
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use first GPU
+        
+        # Log CUDA version from config if available
+        cuda_version = config.get("cuda_version", "12.4")  # Default to 12.4 as reported
+        logger.info(f"Forcing CUDA device on p3.8x EC2 instance with CUDA {cuda_version}")
+        
+        # Create a CUDA device and verify it can be used
         device = torch.device("cuda")
+        try:
+            # Try to allocate a small tensor to verify CUDA works
+            test_tensor = torch.zeros(1, device=device)
+            logger.info("Successfully created test tensor on CUDA device")
+        except Exception as e:
+            logger.error(f"Failed to use CUDA device: {e}")
+            logger.warning("Falling back to CPU despite force_cuda=True")
+            device = torch.device("cpu")
+        
         return device
 
     # 1) If user explicitly asked for 'mps' and it's available, use that

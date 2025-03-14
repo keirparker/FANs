@@ -55,3 +55,4 @@ performance_setting: 'fast'
 # Force CUDA even if torch.cuda.is_available() returns False
 # Use this on p3.8x EC2 instances if CUDA detection fails
 force_cuda: true
+cuda_version: "12.4"  # Specify CUDA version installed on the instance
