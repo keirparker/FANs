@@ -67,10 +67,15 @@ def setup_environment(config):
 
     # Configure logger
     setup_logging(config)
+    
+    # Performance mode settings from config
+    # Valid values: 'fast' (maximizes speed), 'deterministic' (ensures reproducibility)
+    # Default to 'fast' for p3.8x EC2 instances with Tesla V100 GPUs
+    performance_setting = config.get("performance_setting", "fast")
+    performance_mode = performance_setting.lower() == "fast"
 
     # Set random seeds for reproducibility
     if "random_seed" in config:
-
         seed = config["random_seed"]
         
         # 1. Set basic random seeds
@@ -81,33 +86,46 @@ def setup_environment(config):
         # 2. Set Python hash seed
         os.environ['PYTHONHASHSEED'] = str(seed)
         
-        # 3. Set CUDA seeds and deterministic settings
+        # 3. Set CUDA seeds and performance settings
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
             
-            # Make CUDA operations deterministic
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-            
-            # For CUDA >= 10.2
-            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+            if performance_mode:
+                # Optimize for performance on Tesla V100
+                torch.backends.cudnn.deterministic = False
+                torch.backends.cudnn.benchmark = True
+                # Use larger workspace for faster performance
+                os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16384:8"
+                # Use all available CPU threads
+                torch.set_num_threads(0)  # 0 means use all available threads
+                
+                # Disable deterministic algorithms for speed
+                try:
+                    torch.use_deterministic_algorithms(False)
+                except AttributeError:
+                    pass
+                
+                logger.info("Performance mode enabled for Tesla V100 GPUs")
+            else:
+                # Original deterministic behavior for reproducibility
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+                os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+                torch.set_num_threads(1)
+                
+                # Use deterministic algorithms where possible
+                try:
+                    # For PyTorch 1.8+
+                    torch.use_deterministic_algorithms(True)
+                except AttributeError:
+                    # Fallback for older PyTorch
+                    try:
+                        torch.set_deterministic(True)
+                    except AttributeError:
+                        logger.warning("Could not set deterministic algorithms in PyTorch")
         
-        # 4. Limit CPU threads for deterministic behavior
-        torch.set_num_threads(1)
-        
-        # 5. Use deterministic algorithms where possible
-        try:
-            # For PyTorch 1.8+
-            torch.use_deterministic_algorithms(True)
-        except AttributeError:
-            # Fallback for older PyTorch
-            try:
-                torch.set_deterministic(True)
-            except AttributeError:
-                logger.warning("Could not set deterministic algorithms in PyTorch")
-        
-        logger.info(f"Random seed set to {seed} with full deterministic configuration enabled")
+        logger.info(f"Random seed set to {seed} with performance_setting='{performance_setting}' mode enabled")
 
 
 def setup_logging(config):
