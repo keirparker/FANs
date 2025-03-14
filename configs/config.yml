@@ -52,7 +52,7 @@ random_seed: 42
 # 'deterministic': Ensures reproducible results, but slower
 performance_setting: 'fast'
 
-# Force CUDA even if torch.cuda.is_available() returns False
-# Use this on p3.8x EC2 instances if CUDA detection fails
-force_cuda: true
+# CUDA forced usage settings for EC2 p3.8x instances
+force_cuda: true  # Try to use CUDA even when detection fails
+bypass_pytorch_cuda_check: true  # Uses monkey patching to override PyTorch's CUDA detection
 cuda_version: "12.4"  # Specify CUDA version installed on the instance

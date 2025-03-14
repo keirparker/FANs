@@ -16,51 +16,19 @@ from src.models import get_model_by_name
 
 
 
+# Import device_utils for consistent device selection
+from utils.device_utils import select_device as device_utils_select_device
+
 def select_device(config):
     """
     Determine which device to use based on config and hardware availability.
     If config['hyperparameters']['device'] is set to 'mps', 'cuda', or 'cpu',
     we try that. Otherwise, we pick the best available by default.
+    
+    This function delegates to the implementation in device_utils.py
     """
-    # Attempt to read device preference from config
-    device_str = config["hyperparameters"].get("device", None)
-
-    # 1) If user explicitly asked for 'mps' and it's available, use that
-    if device_str == "mps":
-        if torch.backends.mps.is_available():
-            device = torch.device("mps")
-            logger.info("Using MPS device (Apple Silicon).")
-        else:
-            logger.warning("MPS requested but not available. Falling back to CPU.")
-            device = torch.device("cpu")
-
-    # 2) If user explicitly asked for 'cuda' and it's available, use that
-    elif device_str == "cuda":
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-            logger.info("Using CUDA device (NVIDIA GPU).")
-        else:
-            logger.warning("CUDA requested but not available. Falling back to CPU.")
-            device = torch.device("cpu")
-
-    # 3) If user explicitly asked for 'cpu', or device_str is unknown
-    elif device_str == "cpu":
-        device = torch.device("cpu")
-        logger.info("Using CPU device as requested.")
-
-    # 4) Otherwise, pick the best available automatically
-    else:
-        if torch.backends.mps.is_available():
-            device = torch.device("mps")
-            logger.info("No device specified; using MPS for Apple Silicon.")
-        elif torch.cuda.is_available():
-            device = torch.device("cuda")
-            logger.info("No device specified; using CUDA.")
-        else:
-            device = torch.device("cpu")
-            logger.info("No device specified; using CPU.")
-
-    return device
+    # Use the implementation from device_utils.py
+    return device_utils_select_device(config)
 
 
 def train_model(model, t_train, data_train, config, device):
