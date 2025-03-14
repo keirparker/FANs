@@ -199,7 +199,7 @@ def compare_models(run_ids=None, experiment_id=None, metric="test_r2", output_di
         logger.error(f"Error generating model comparison: {e}")
         return None
 
-def generate_model_summary_table(run_ids, experiment_name):
+def generate_model_summary_table(run_ids, experiment_name, run_number=None):
     """
     Generate a summary table of model performance and log it to MLflow
     under the same experiment as the runs.
@@ -207,6 +207,7 @@ def generate_model_summary_table(run_ids, experiment_name):
     Args:
         run_ids: List of MLflow run IDs
         experiment_name: Name of the experiment
+        run_number: Run number (optional)
 
     Returns:
         pd.DataFrame: The summary table
@@ -314,16 +315,30 @@ def generate_model_summary_table(run_ids, experiment_name):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         username = os.environ.get("USER", "keirparker")
 
-        # Generate file paths with timestamp to avoid overwriting
-        timestr = time.strftime("%Y%m%d-%H%M%S")
-        os.makedirs("results", exist_ok=True)
-
-        html_path = (
-            f"results/summary_table_{experiment_name.replace(' ', '_')}_{timestr}.html"
-        )
-        csv_path = (
-            f"results/summary_table_{experiment_name.replace(' ', '_')}_{timestr}.csv"
-        )
+        # Clean experiment name for safe path usage
+        safe_exp_name = experiment_name.replace(" ", "_").replace("/", "_")
+        
+        # Determine directory and filenames
+        if run_number is not None:
+            # Create experiment directory structure
+            exp_dir = f"results/{safe_exp_name}"
+            os.makedirs(exp_dir, exist_ok=True)
+            
+            # Create run directory
+            run_dir = f"{exp_dir}/run_{run_number}"
+            os.makedirs(run_dir, exist_ok=True)
+            
+            # Set filenames without timestamp since we have run number
+            html_path = f"{run_dir}/summary_table.html"
+            csv_path = f"{run_dir}/summary_table.csv"
+        else:
+            # Create results directory if it doesn't exist
+            os.makedirs("results", exist_ok=True)
+            
+            # Generate filenames with timestamp for backward compatibility
+            timestr = time.strftime("%Y%m%d-%H%M%S")
+            html_path = f"results/summary_table_{safe_exp_name}_{timestr}.html"
+            csv_path = f"results/summary_table_{safe_exp_name}_{timestr}.csv"
 
         # Add a group column for dataset + data_version
         df["group"] = df["dataset"] + "_" + df["data_version"]
@@ -448,31 +463,61 @@ def generate_model_summary_table(run_ids, experiment_name):
         df_csv.to_csv(csv_path, index=False)
 
         # Now log to MLflow under the same experiment
-        if experiment_id:
-            # Log as a special "summary" run within the same experiment
-            with mlflow.start_run(
-                run_name=f"Summary-{timestr}", experiment_id=experiment_id
-            ):
-                # Log artifacts
-                mlflow.log_artifact(html_path)
-                mlflow.log_artifact(csv_path)
+        try:
+            # Try to get the experiment ID if we don't have it already
+            if not experiment_id:
+                try:
+                    # First try to get it from the runs
+                    if run_ids:
+                        first_run = client.get_run(run_ids[0])
+                        experiment_id = first_run.info.experiment_id
+                    
+                    # If that didn't work, try to get it by name
+                    if not experiment_id and experiment_name:
+                        experiment = mlflow.get_experiment_by_name(experiment_name)
+                        if experiment:
+                            experiment_id = experiment.experiment_id
+                except Exception as e:
+                    logger.warning(f"Could not get experiment ID: {e}")
+            
+            # Only try to log if we have an experiment ID
+            if experiment_id:
+                # Make sure there's no active run that might conflict
+                if mlflow.active_run():
+                    mlflow.end_run()
+                
+                # Generate a unique run name with timestamp
+                timestr = time.strftime("%Y%m%d-%H%M%S")
+                
+                # Start a new run for logging the summary
+                with mlflow.start_run(
+                    run_name=f"Summary-{timestr}", experiment_id=experiment_id
+                ):
+                    # Log artifacts
+                    mlflow.log_artifact(html_path)
+                    mlflow.log_artifact(csv_path)
 
-                # Log metadata
-                mlflow.set_tag("summary_type", "model_comparison")
-                mlflow.set_tag("table_generated_at", timestamp)
-                mlflow.set_tag("table_generated_by", username)
-                mlflow.set_tag("runs_analyzed", len(df))
-                mlflow.set_tag("is_summary", "true")  # Easy tag to filter for summaries
+                    # Log metadata
+                    mlflow.set_tag("summary_type", "model_comparison")
+                    mlflow.set_tag("table_generated_at", timestamp)
+                    mlflow.set_tag("table_generated_by", username)
+                    mlflow.set_tag("runs_analyzed", len(df))
+                    mlflow.set_tag("is_summary", "true")  # Easy tag to filter for summaries
+                    if run_number is not None:
+                        mlflow.set_tag("run_number", str(run_number))
 
-                # Log the run IDs that were analyzed
-                mlflow.log_param("analyzed_runs", ",".join(run_ids))
+                    # Log the run IDs that were analyzed
+                    mlflow.log_param("analyzed_runs", ",".join(run_ids))
 
-                logger.info(
-                    f"Summary table logged to MLflow experiment '{experiment_name}' and saved to {html_path}"
-                )
-                logger.info(f"Summary run ID: {mlflow.active_run().info.run_id}")
-        else:
-            logger.warning("Could not log to MLflow - no experiment ID found")
+                    logger.info(
+                        f"Summary table logged to MLflow experiment '{experiment_name}' and saved to {html_path}"
+                    )
+                    logger.info(f"Summary run ID: {mlflow.active_run().info.run_id}")
+            else:
+                logger.warning("Could not log to MLflow - no experiment ID found")
+                logger.info(f"Summary table saved locally to {html_path}")
+        except Exception as e:
+            logger.error(f"Error logging summary to MLflow: {e}")
             logger.info(f"Summary table saved locally to {html_path}")
 
         return df_csv
@@ -1209,54 +1254,59 @@ def plot_losses_by_epoch_comparison(
                 epochs = sorted(train_loss_by_epoch.keys())
                 losses = [train_loss_by_epoch[e] for e in epochs]
 
-                if smooth_factor and len(losses) > smooth_factor:
-                    # Apply smoothing if requested
-                    smooth_losses = np.convolve(
-                        losses, np.ones(smooth_factor) / smooth_factor, mode="valid"
-                    )
-                    plt.plot(
-                        epochs[smooth_factor - 1 :],
-                        smooth_losses,
-                        label=f"{run_name} (train)",
-                        color=colors[i],
-                        linewidth=2,
-                    )
-                else:
-                    plt.plot(
-                        epochs,
-                        losses,
-                        label=f"{run_name} (train)",
-                        color=colors[i],
-                        linewidth=2,
-                    )
+                # Always show raw data with markers
+                # First plot line
+                line = plt.plot(
+                    epochs,
+                    losses,
+                    label=f"{run_name} (train)",
+                    color=colors[i],
+                    linewidth=1.5,
+                    alpha=0.8,
+                )
+                
+                # Then add markers at each data point
+                plt.scatter(
+                    epochs,
+                    losses,
+                    marker='o',
+                    s=40,  # Larger markers
+                    color=colors[i],
+                    alpha=0.9,
+                    edgecolors='white',
+                    linewidth=0.7,
+                    zorder=10,  # Ensure markers are on top
+                )
 
             # Plot validation loss if available and requested
             if include_validation and val_loss_by_epoch:
                 val_epochs = sorted(val_loss_by_epoch.keys())
                 val_losses = [val_loss_by_epoch[e] for e in val_epochs]
 
-                if smooth_factor and len(val_losses) > smooth_factor:
-                    # Apply smoothing if requested
-                    smooth_val_losses = np.convolve(
-                        val_losses, np.ones(smooth_factor) / smooth_factor, mode="valid"
-                    )
-                    plt.plot(
-                        val_epochs[smooth_factor - 1 :],
-                        smooth_val_losses,
-                        label=f"{run_name} (val)",
-                        color=colors[i],
-                        linewidth=2,
-                        linestyle="--",
-                    )
-                else:
-                    plt.plot(
-                        val_epochs,
-                        val_losses,
-                        label=f"{run_name} (val)",
-                        color=colors[i],
-                        linewidth=2,
-                        linestyle="--",
-                    )
+                # Always show raw validation data with markers too
+                # First plot line (dashed for validation loss)
+                line_val = plt.plot(
+                    val_epochs,
+                    val_losses,
+                    label=f"{run_name} (val)",
+                    color=colors[i],
+                    linestyle="--",
+                    linewidth=1.5,
+                    alpha=0.7,
+                )
+                
+                # Then add markers at each data point
+                plt.scatter(
+                    val_epochs,
+                    val_losses,
+                    marker='x',  # Use x for validation
+                    s=40,  # Larger markers
+                    color=colors[i],
+                    alpha=0.9,
+                    edgecolors='white',
+                    linewidth=0.8,
+                    zorder=10,  # Ensure markers are on top
+                )
 
         # Add plot labels and styling
         plt.xlabel("Epoch", fontsize=12)

@@ -6,6 +6,10 @@ Configuration utilities for the ML experimentation framework.
 import yaml
 import os
 from loguru import logger
+import random
+import numpy as np
+import torch
+
 
 
 def load_config(config_path="configs/config.yml"):
@@ -66,17 +70,44 @@ def setup_environment(config):
 
     # Set random seeds for reproducibility
     if "random_seed" in config:
-        import random
-        import numpy as np
-        import torch
 
         seed = config["random_seed"]
+        
+        # 1. Set basic random seeds
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
+        
+        # 2. Set Python hash seed
+        os.environ['PYTHONHASHSEED'] = str(seed)
+        
+        # 3. Set CUDA seeds and deterministic settings
         if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
-        logger.info(f"Random seed set to {seed}")
+            
+            # Make CUDA operations deterministic
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            
+            # For CUDA >= 10.2
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        
+        # 4. Limit CPU threads for deterministic behavior
+        torch.set_num_threads(1)
+        
+        # 5. Use deterministic algorithms where possible
+        try:
+            # For PyTorch 1.8+
+            torch.use_deterministic_algorithms(True)
+        except AttributeError:
+            # Fallback for older PyTorch
+            try:
+                torch.set_deterministic(True)
+            except AttributeError:
+                logger.warning("Could not set deterministic algorithms in PyTorch")
+        
+        logger.info(f"Random seed set to {seed} with full deterministic configuration enabled")
 
 
 def setup_logging(config):

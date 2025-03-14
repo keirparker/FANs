@@ -18,6 +18,42 @@ def complex_5_fn(x: np.ndarray) -> np.ndarray:
         data += (1 / n) * sawtooth_wave(n * x, n)
     return data
 
+def increasing_amp_freq_fn(x: np.ndarray) -> np.ndarray:
+    """
+    Generate a signal with progressively increasing amplitude and frequency.
+
+    The function creates a chirp-like signal where both amplitude and frequency
+    increase as x increases. This creates a challenging pattern for models to learn.
+
+    Parameters:
+        x: Input array of x values
+
+    Returns:
+        Array of y values with increasing amplitude and frequency
+    """
+    # Normalize x to a 0-1 range for the visible portion
+    x_min, x_max = np.min(x), np.max(x)
+    x_norm = (x - x_min) / (x_max - x_min)
+
+    # Set amplitude range: start at 0.2, increase to 2.0
+    a_min, a_max = 0.2, 2.0
+    amplitude = a_min + (a_max - a_min) * x_norm
+
+    # Set frequency range: start at 0.5 Hz, increase to 5.0 Hz
+    f_min, f_max = 0.5, 5.0
+
+    # Calculate the instantaneous frequency
+    freq = f_min + (f_max - f_min) * x_norm
+
+    # The phase is the integral of frequency
+    # For a linear frequency increase, the phase is quadratic
+    phase = 2 * np.pi * (f_min * x + 0.5 * (f_max - f_min) * x_norm * x)
+
+    # The final signal combines the increasing amplitude and frequency
+    signal = amplitude * np.sin(phase)
+
+    return signal
+
 
 ##############################################################################
 # PERIODIC_SPECS holds all domain & data logic for each type.
@@ -26,8 +62,8 @@ def complex_5_fn(x: np.ndarray) -> np.ndarray:
 PERIODIC_SPECS = {
     "sin": {
         "period": 6,
-        "domain_train": lambda p, ns: np.linspace(-4*p*np.pi, 4*p*np.pi, ns),
-        "domain_test":  lambda p, ns: np.linspace(-12*p*np.pi, 12*p*np.pi, ns),
+        "domain_train": lambda p, ns: np.linspace(-5*p*np.pi, 5*p*np.pi, ns),
+        "domain_test":  lambda p, ns: np.linspace(-15*p*np.pi, 15*p*np.pi, ns),
         "data_fn":      lambda t: np.sin(t),
         "config": {
             "batchsize": 32,
@@ -41,8 +77,8 @@ PERIODIC_SPECS = {
     },
     "mod": {
         "period": 20,
-        "domain_train": lambda p, ns: np.linspace(-4*p, 4*p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-12*p, 12*p, ns),
+        "domain_train": lambda p, ns: np.linspace(-5*p, 5*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-15*p, 15*p, ns),
         "data_fn":      lambda t: np.mod(t, 5),
         "config": {
             "batchsize": 32,
@@ -56,8 +92,8 @@ PERIODIC_SPECS = {
     },
     "complex_1": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-4*p, 4*p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-12*p, 12*p, ns),
+        "domain_train": lambda p, ns: np.linspace(-5*p, 5*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-15*p, 15*p, ns),
         "data_fn":      lambda t: np.exp(np.sin(np.pi * t)**2 + np.cos(t) + np.mod(t, 3) - 1),
         "config": {
             "batchsize": 32,
@@ -71,8 +107,8 @@ PERIODIC_SPECS = {
     },
     "complex_2": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-4*p, 4*p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-12*p, 12*p, ns),
+        "domain_train": lambda p, ns: np.linspace(-5*p, 5*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-15*p, 15*p, ns),
         "data_fn":      lambda t: (1 + np.sin(t)) * np.sin(2 * t),
         "config": {
             "batchsize": 32,
@@ -86,8 +122,8 @@ PERIODIC_SPECS = {
     },
     "complex_3": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-p, p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-2*p, 2*p, ns),
+        "domain_train": lambda p, ns: np.linspace(-5*p, 5*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-15*p, 15*p, ns),
         "data_fn":      lambda t: np.sin(t + np.sin(2 * t)),
         "config": {
             "batchsize": 32,
@@ -101,8 +137,8 @@ PERIODIC_SPECS = {
     },
     "complex_4": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-p, p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-2*p, 2*p, ns),
+        "domain_train": lambda p, ns: np.linspace(-5*p, 5*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-15*p, 15*p, ns),
         "data_fn":      lambda t: np.sin(t)*(np.cos(2*t)**2) + np.cos(t)*(np.sin(3*t)**2),
         "config": {
             "batchsize": 32,
@@ -116,8 +152,8 @@ PERIODIC_SPECS = {
     },
     "complex_5": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-p, p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-2*p, 2*p, ns),
+        "domain_train": lambda p, ns: np.linspace(-5*p, 5*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-15*p, 15*p, ns),
         "data_fn":      complex_5_fn,  # uses that helper
         "config": {
             "batchsize": 32,
@@ -131,8 +167,8 @@ PERIODIC_SPECS = {
     },
     "complex_6": {
         "period": 4,
-        "domain_train": lambda p, ns: np.linspace(-p, p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-2*p, 2*p, ns),
+        "domain_train": lambda p, ns: np.linspace(-5*p, 5*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-15*p, 15*p, ns),
         "data_fn":      lambda t: np.exp(np.sin(t)) / (1 + np.cos(2*t)**2),
         "config": {
             "batchsize": 32,
@@ -144,6 +180,21 @@ PERIODIC_SPECS = {
             "y_lower": 0,
         }
     },
+    "increasing_amp_freq": {
+        "period": 10,
+        "domain_train": lambda p, ns: np.linspace(-5*p, 5*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-15*p, 15*p, ns),
+        "data_fn":      increasing_amp_freq_fn,
+        "config": {
+            "batchsize": 32,
+            "numepoch": 10000,
+            "printepoch": 50,
+            "lr": 1e-5,
+            "wd": 0.01,
+            "y_uper": 2.5,
+            "y_lower": -2.5,
+        }
+    }
 }
 
 

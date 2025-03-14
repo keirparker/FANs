@@ -193,14 +193,18 @@ def make_sparse(
         indices = np.linspace(0, n-1, k, dtype=int)
 
     elif method == "random":
-        # Random selection
-        indices = np.sort(np.random.choice(n, size=k, replace=False))
+        # Get random seed from function parameter or use a controlled local Random State
+        local_rng = np.random.RandomState(seed) if seed is not None else np.random
+        # Random selection with controlled seed
+        indices = np.sort(local_rng.choice(n, size=k, replace=False))
 
     elif method == "stratified":
+        # Get random seed for stratified sampling
+        local_rng = np.random.RandomState(seed) if seed is not None else np.random
         # Stratified sampling (divide into k bins, sample one from each)
         bin_edges = np.linspace(0, n, k+1, dtype=int)
         indices = np.array([
-            np.random.choice(np.arange(bin_edges[i], bin_edges[i+1]))
+            local_rng.choice(np.arange(bin_edges[i], bin_edges[i+1]))
             for i in range(k)
         ])
 
@@ -414,7 +418,8 @@ class AdaptiveTimeSeriesDataset(Dataset):
         cache_size: int = 1000,
         precision: torch.dtype = torch.float32,
         return_indices: bool = False,
-        augmentations: Optional[List[Dict[str, Any]]] = None
+        augmentations: Optional[List[Dict[str, Any]]] = None,
+        seed: Optional[int] = None
     ):
         """
         Initialize the advanced dataset.
@@ -429,12 +434,14 @@ class AdaptiveTimeSeriesDataset(Dataset):
             precision: Floating point precision for tensors
             return_indices: Whether to return indices with samples
             augmentations: List of augmentation configs to apply dynamically
+            seed: Random seed for reproducible augmentations and transformations
         """
         self.return_indices = return_indices
         self.cache_size = cache_size
         self.transform = transform
         self.target_transform = target_transform
         self.augmentations = augmentations or []
+        self.seed = seed
 
         # Create persistent tensors with specified precision
         self.x = torch.tensor(t, dtype=precision)
@@ -479,10 +486,25 @@ class AdaptiveTimeSeriesDataset(Dataset):
             if self.target_transform is not None:
                 y = self.target_transform(y)
 
-            # Apply augmentations if specified
-            if self.augmentations and np.random.random() < 0.5:  # 50% chance to augment
-                aug = np.random.choice(self.augmentations)
-                x, y = self._apply_augmentation(x, y, aug)
+            # Apply augmentations if specified - use reproducible randomness
+            if self.augmentations:
+                # Use a deterministic seed based on the sample index
+                if hasattr(self, 'seed') and self.seed is not None:
+                    # Create a unique seed for this sample derived from the global seed
+                    sample_seed = self.seed + idx
+                    rng = np.random.RandomState(sample_seed)
+                    
+                    # Use consistent randomness for augmentation decision
+                    if rng.random() < 0.5:  # 50% chance to augment
+                        # Deterministically choose an augmentation
+                        aug_idx = rng.randint(0, len(self.augmentations))
+                        aug = self.augmentations[aug_idx]
+                        x, y = self._apply_augmentation(x, y, aug, rng)
+                else:
+                    # Fallback to global random state if no seed specified
+                    if np.random.random() < 0.5:  # 50% chance to augment
+                        aug = np.random.choice(self.augmentations)
+                        x, y = self._apply_augmentation(x, y, aug)
 
             # Pack result based on return_indices flag
             result = ((idx, x, y) if self.return_indices else (x, y))
@@ -509,29 +531,74 @@ class AdaptiveTimeSeriesDataset(Dataset):
             x_tensors, y_tensors = zip(*items)
             return torch.stack(x_tensors), torch.stack(y_tensors)
 
-    def _apply_augmentation(self, x, y, aug_config):
-        """Apply an augmentation to a sample"""
+    def _apply_augmentation(self, x, y, aug_config, rng=None):
+        """
+        Apply an augmentation to a sample
+        
+        Args:
+            x: Input tensor
+            y: Target tensor
+            aug_config: Augmentation configuration dictionary
+            rng: Optional numpy RandomState for reproducible augmentation
+        """
         aug_type = aug_config.get('type')
+        
+        # Use provided RNG or fallback to global random state
+        if rng is None:
+            # Use PyTorch's global generator with default seed
+            generator = torch.Generator()
+            if hasattr(self, 'seed') and self.seed is not None:
+                generator.manual_seed(self.seed)
+        else:
+            # Convert numpy RandomState to PyTorch-compatible randomness
+            # by using the numpy-generated random values
+            generator = None  # We'll use numpy random values directly
 
         if aug_type == 'noise':
             # Add noise to input
             noise_level = aug_config.get('level', 0.05)
-            noise = torch.randn_like(x) * noise_level
+            if rng is not None:
+                # Use numpy for reproducible noise
+                noise_np = rng.randn(*x.shape) * noise_level
+                noise = torch.tensor(noise_np, dtype=x.dtype, device=x.device)
+            else:
+                # Use PyTorch's randomness
+                noise = torch.randn_like(x, generator=generator) * noise_level
             return x + noise, y
 
         elif aug_type == 'scale':
             # Scale inputs and outputs
-            scale = aug_config.get('factor', 1.0) + torch.randn(1).item() * aug_config.get('std', 0.1)
-            return x * scale, y * scale
+            std = aug_config.get('std', 0.1)
+            if rng is not None:
+                # Use numpy for reproducible scaling
+                scale_factor = aug_config.get('factor', 1.0) + rng.randn() * std
+            else:
+                # Use PyTorch's randomness
+                scale_factor = aug_config.get('factor', 1.0) + torch.randn(1, generator=generator).item() * std
+            return x * scale_factor, y * scale_factor
 
         elif aug_type == 'shift':
             # Shift inputs
-            shift = aug_config.get('amount', 0.0) + torch.randn(1).item() * aug_config.get('std', 0.1)
-            return x + shift, y
+            std = aug_config.get('std', 0.1)
+            if rng is not None:
+                # Use numpy for reproducible shift
+                shift_amount = aug_config.get('amount', 0.0) + rng.randn() * std
+            else:
+                # Use PyTorch's randomness
+                shift_amount = aug_config.get('amount', 0.0) + torch.randn(1, generator=generator).item() * std
+            return x + shift_amount, y
 
         elif aug_type == 'flip':
             # Flip the time series
-            if torch.rand(1).item() < aug_config.get('prob', 0.5):
+            flip_prob = aug_config.get('prob', 0.5)
+            if rng is not None:
+                # Use numpy for reproducible decision
+                do_flip = rng.random() < flip_prob
+            else:
+                # Use PyTorch's randomness
+                do_flip = torch.rand(1, generator=generator).item() < flip_prob
+                
+            if do_flip:
                 return -x, -y
             return x, y
 
@@ -600,6 +667,9 @@ def prepare_data_loaders(
     # Ensure batch size fits the data
     batch_size = min(batch_size, len(t_train))
 
+    # Get seed for reproducibility
+    seed = config.get("random_seed", 42)
+    
     # Create train dataset with advanced features
     augmentations = [
         {'type': 'noise', 'level': 0.03},
@@ -611,7 +681,8 @@ def prepare_data_loaders(
         t_train, data_train,
         precision=torch_precision,
         device=device,
-        augmentations=augmentations
+        augmentations=augmentations,
+        seed=seed  # Pass seed for reproducible augmentations
     )
 
     # Create train sampler based on specified strategy
@@ -666,7 +737,8 @@ def prepare_data_loaders(
             t_val, data_val,
             precision=torch_precision,
             device=device,
-            augmentations=None  # No augmentation for validation
+            augmentations=None,  # No augmentation for validation
+            seed=seed  # Still pass seed for deterministic behavior
         )
 
         val_loader = DataLoader(

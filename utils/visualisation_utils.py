@@ -82,12 +82,30 @@ class VisualizationConfig:
         ax.yaxis.label.set_fontsize(self.config["label_size"])
 
 
-def _generate_plot_filename(model_name, dataset_type, data_version, plot_type):
+def _generate_plot_filename(model_name, dataset_type, data_version, plot_type, experiment_name=None, run_number=None):
     """Generate unique filename for a plot."""
     timestr = time.strftime("%Y%m%d-%H%M%S")
+    
     # Ensure plots directory exists
     os.makedirs("plots", exist_ok=True)
-    return f"plots/{model_name}_{dataset_type}_{data_version}_{plot_type}_{timestr}.png"
+    
+    # If experiment name and run number provided, create directory structure
+    if experiment_name and run_number:
+        # Clean experiment name for safe path usage
+        safe_exp_name = experiment_name.replace(" ", "_").replace("/", "_")
+        
+        # Create experiment directory
+        exp_dir = f"plots/{safe_exp_name}"
+        os.makedirs(exp_dir, exist_ok=True)
+        
+        # Create run directory
+        run_dir = f"{exp_dir}/run_{run_number}"
+        os.makedirs(run_dir, exist_ok=True)
+        
+        return f"{run_dir}/{model_name}_{dataset_type}_{data_version}_{plot_type}.png"
+    else:
+        # Flat structure with timestamp for backward compatibility
+        return f"plots/{model_name}_{dataset_type}_{data_version}_{plot_type}_{timestr}.png"
 
 
 def plot_training_history(
@@ -96,6 +114,8 @@ def plot_training_history(
     dataset_type: str,
     data_version: str,
     viz_config: Optional[VisualizationConfig] = None,
+    experiment_name: Optional[str] = None,
+    run_number: Optional[int] = None,
 ) -> List[str]:
     """
     Generate visualizations of model training history.
@@ -315,7 +335,8 @@ def plot_training_history(
 
     # Save plot
     plot_path = _generate_plot_filename(
-        model_name, dataset_type, data_version, "training_history"
+        model_name, dataset_type, data_version, "training_history", 
+        experiment_name=experiment_name, run_number=run_number
     )
     plt.savefig(plot_path, bbox_inches="tight")
     plt.close(fig)
@@ -372,7 +393,8 @@ def plot_training_history(
 
         # Save plot
         timing_plot_path = _generate_plot_filename(
-            model_name, dataset_type, data_version, "epoch_times"
+            model_name, dataset_type, data_version, "epoch_times",
+            experiment_name=experiment_name, run_number=run_number
         )
         plt.savefig(timing_plot_path, bbox_inches="tight")
         plt.close(fig)
@@ -456,6 +478,8 @@ def plot_model_predictions(
     true_func: Optional[Callable] = None,
     uncertainty: Optional[np.ndarray] = None,
     viz_config: Optional[VisualizationConfig] = None,
+    experiment_name: Optional[str] = None,
+    run_number: Optional[int] = None,
 ) -> str:
     """
     Generate visualization of model predictions with statistical analysis.
@@ -652,7 +676,8 @@ def plot_model_predictions(
 
     # Save plot
     plot_path = _generate_plot_filename(
-        model_name, dataset_type, data_version, "predictions"
+        model_name, dataset_type, data_version, "predictions",
+        experiment_name=experiment_name, run_number=run_number
     )
     plt.savefig(plot_path, bbox_inches="tight")
     plt.close(fig)
@@ -1433,29 +1458,42 @@ def plot_loss_by_subgroups(
                 else:
                     smooth_values = values
 
-                # Plot line
-                line = plt.plot(
-                    epochs,
-                    smooth_values,
-                    linestyle="-",
-                    color=color,
-                    linewidth=1,
-                    label=f"{model_name}",
-                    alpha=0.9,
-                )[0]
-
-                # Add markers if requested
+                # For unsmoothed plots, we'll emphasize the markers
                 if show_markers:
+                    # First plot the connecting line (thinner)
+                    plt.plot(
+                        epochs,
+                        values,  # Use original values always
+                        linestyle="-",
+                        color=color,
+                        linewidth=1.0,
+                        alpha=0.7,
+                        label=f"{model_name}",
+                    )
+                    
+                    # Then add prominent markers
                     plt.scatter(
                         epochs,
-                        values,  # Original unsmoothed values
+                        values,
                         marker="o",
-                        s=30,
+                        s=40,  # Larger markers
                         color=color,
-                        alpha=0.7,
+                        alpha=0.9,  # More visible
                         edgecolors="white",
-                        linewidth=0.5,
+                        linewidth=0.7,
+                        zorder=10,  # Ensure markers are on top
                     )
+                else:
+                    # Just plot the line without markers
+                    line = plt.plot(
+                        epochs,
+                        values,  # Use original values, not smoothed
+                        linestyle="-",
+                        color=color,
+                        linewidth=1.5,
+                        label=f"{model_name}",
+                        alpha=0.9,
+                    )[0]
 
         # Customize plot
         plt.title(f"Loss Curves - {dataset_type} ({data_version})", fontsize=14)
@@ -1549,6 +1587,7 @@ def log_enhanced_plots_to_mlflow(
     run_ids: List[str],
     output_dir: str = "plots",
     artifact_path: str = "enhanced_plots",
+    run_number: int = None,
 ):
     """
     Generate and log enhanced loss plots to MLflow.
@@ -1558,6 +1597,7 @@ def log_enhanced_plots_to_mlflow(
         run_ids: List of run IDs to include in visualization
         output_dir: Directory to save intermediate plots
         artifact_path: Path within MLflow artifacts to store plots
+        run_number: Run number identifier (optional)
 
     Returns:
         List of generated file paths
@@ -1568,38 +1608,51 @@ def log_enhanced_plots_to_mlflow(
     plot_paths = plot_loss_by_subgroups(
         run_ids,
         output_dir=output_dir,
-        show_markers=False,
-        line_smoothing=0.0,  # No smoothing for clearer data visualization
+        show_markers=True,  # Always show data points as markers
+        line_smoothing=0.0,  # No smoothing - show raw data
     )
 
     # Log plots to MLflow as a separate "summary" run
     if plot_paths:
-        timestr = time.strftime("%Y%m%d-%H%M%S")
+        try:
+            # Make sure there's no active run that might conflict
+            if mlflow.active_run():
+                mlflow.end_run()
+            
+            # Generate a unique run name with timestamp
+            timestr = time.strftime("%Y%m%d-%H%M%S")
+            
+            with mlflow.start_run(
+                run_name=f"EnhancedPlots-{timestr}", experiment_id=experiment_id
+            ):
+                # Log artifacts
+                for plot_path in plot_paths:
+                    mlflow.log_artifact(plot_path, artifact_path)
 
-        with mlflow.start_run(
-            run_name=f"EnhancedPlots-{timestr}", experiment_id=experiment_id
-        ):
-            # Log artifacts
-            for plot_path in plot_paths:
-                mlflow.log_artifact(plot_path, artifact_path)
+                # Log metadata
+                mlflow.set_tag("plot_type", "enhanced_loss_plots")
+                mlflow.set_tag("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                mlflow.set_tag("generated_by", os.environ.get("USER", "keirparker"))
+                mlflow.set_tag("runs_visualized", len(run_ids))
+                mlflow.set_tag("is_summary", "true")
+                
+                # Add run number if provided
+                if run_number is not None:
+                    mlflow.set_tag("run_number", str(run_number))
 
-            # Log metadata
-            mlflow.set_tag("plot_type", "enhanced_loss_plots")
-            mlflow.set_tag("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            mlflow.set_tag("generated_by", os.environ.get("USER", "keirparker"))
-            mlflow.set_tag("runs_visualized", len(run_ids))
-            mlflow.set_tag("is_summary", "true")
+                # Log the run IDs that were analyzed
+                mlflow.log_param("analyzed_runs", ",".join(run_ids))
 
-            # Log the run IDs that were analyzed
-            mlflow.log_param("analyzed_runs", ",".join(run_ids))
-
-            logger.info(
-                f"Enhanced plots logged to MLflow with run ID: {mlflow.active_run().info.run_id}"
-            )
+                logger.info(
+                    f"Enhanced plots logged to MLflow with run ID: {mlflow.active_run().info.run_id}"
+                )
+        except Exception as e:
+            logger.error(f"Error logging enhanced plots to MLflow: {e}")
+            logger.info(f"Enhanced plots saved locally to {output_dir}")
 
     return plot_paths
 
-def create_enhanced_visualizations(run_ids, experiment_id, experiment_name):
+def create_enhanced_visualizations(run_ids, experiment_id, experiment_name, run_number=None):
     """
     Create enhanced visualizations for the completed experiment runs.
 
@@ -1607,6 +1660,7 @@ def create_enhanced_visualizations(run_ids, experiment_id, experiment_name):
         run_ids: List of run IDs to visualize
         experiment_id: MLflow experiment ID
         experiment_name: Name of the experiment
+        run_number: Run number (optional)
     """
     if not run_ids:
         logger.warning("No run IDs provided for enhanced visualizations")
@@ -1614,9 +1668,17 @@ def create_enhanced_visualizations(run_ids, experiment_id, experiment_name):
 
     logger.info("Generating enhanced loss plot visualizations...")
 
-    # Create output directory with timestamp
-    timestr = time.strftime("%Y%m%d-%H%M%S")
-    output_dir = f"plots/enhanced_{experiment_name.replace(' ', '_')}_{timestr}"
+    # Create output directory with experiment name and run number if provided
+    safe_exp_name = experiment_name.replace(" ", "_").replace("/", "_")
+    
+    if run_number is not None:
+        # Use organized structure with experiment name and run number
+        output_dir = f"plots/{safe_exp_name}/run_{run_number}"
+    else:
+        # Fall back to timestamp-based directory for backward compatibility
+        timestr = time.strftime("%Y%m%d-%H%M%S")
+        output_dir = f"plots/enhanced_{safe_exp_name}_{timestr}"
+        
     os.makedirs(output_dir, exist_ok=True)
 
     # Generate and log enhanced plots
@@ -1625,6 +1687,7 @@ def create_enhanced_visualizations(run_ids, experiment_id, experiment_name):
         run_ids=run_ids,
         output_dir=output_dir,
         artifact_path="enhanced_plots",
+        run_number=run_number
     )
 
     if plots:

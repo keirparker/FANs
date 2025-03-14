@@ -78,11 +78,27 @@ def create_scheduler(optimizer, config):
         return None
 
 
+def worker_init_fn(worker_id):
+    """
+    Initialize worker processes with a seed based on the worker id.
+    This ensures reproducible data loading across worker processes.
+    
+    Args:
+        worker_id: ID of the dataloader worker process
+    """
+    # Get base seed from PyTorch's initial seed (which comes from our global seed)
+    worker_seed = torch.initial_seed() % 2**32
+    
+    # Each worker gets a different seed derived from the initial seed and worker_id
+    np.random.seed(worker_seed + worker_id)
+    random.seed(worker_seed + worker_id)
+
+
 def prepare_data_loaders(
     t_train, data_train, config, t_val=None, data_val=None, device=None
 ):
     """
-    Prepare data loaders for training and validation.
+    Prepare data loaders for training and validation with reproducible behavior.
 
     Args:
         t_train: Training time points
@@ -95,8 +111,14 @@ def prepare_data_loaders(
     Returns:
         tuple: (train_loader, val_loader)
     """
+    import random
+    
+    # Get seed from config for reproducible shuffling
+    seed = config.get("random_seed", 42)
+    
     batch_size = config["hyperparameters"].get("batch_size", 64)
     batch_size = min(batch_size, len(t_train))
+    num_workers = config["hyperparameters"].get("num_workers", 0)
 
     # Convert to PyTorch tensors
     x_tensor = torch.from_numpy(t_train).float().unsqueeze(-1)
@@ -106,12 +128,20 @@ def prepare_data_loaders(
         x_tensor = x_tensor.to(device)
         y_tensor = y_tensor.to(device)
 
+    # Create reproducible generator for shuffling
+    g = torch.Generator()
+    g.manual_seed(seed)
+    
     train_dataset = torch.utils.data.TensorDataset(x_tensor, y_tensor)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=config["hyperparameters"].get("num_workers", 0),
+        num_workers=num_workers,
+        worker_init_fn=worker_init_fn if num_workers > 0 else None,
+        generator=g,
+        drop_last=False,  # More deterministic to keep all samples
+        pin_memory=True if device is not None and device.type == 'cuda' else False
     )
 
     val_loader = None
@@ -127,8 +157,10 @@ def prepare_data_loaders(
         val_loader = torch.utils.data.DataLoader(
             val_dataset,
             batch_size=batch_size,
-            shuffle=False,
-            num_workers=config["hyperparameters"].get("num_workers", 0),
+            shuffle=False,  # No need to shuffle validation data
+            num_workers=num_workers,
+            worker_init_fn=worker_init_fn if num_workers > 0 else None,
+            pin_memory=True if device is not None and device.type == 'cuda' else False
         )
 
     return train_loader, val_loader
@@ -187,8 +219,19 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
     Returns:
         dict: Training history (losses, metrics, etc.)
     """
+    # Get the random seed for reproducible validation split
+    seed = config.get("random_seed", 42)
+    
     # Split data into training and validation if needed
     if validation_split > 0:
+        # Set a specific seed state for validation split to ensure reproducibility
+        # Save the current random state
+        rng_state = np.random.get_state()
+        
+        # Set seed for this operation
+        np.random.seed(seed)
+        
+        # Generate reproducible permutation
         val_size = int(len(t_train) * validation_split)
         indices = np.random.permutation(len(t_train))
         val_indices, train_indices = indices[:val_size], indices[val_size:]
@@ -196,6 +239,9 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
         t_val, data_val = t_train[val_indices], data_train[val_indices]
         t_train, data_train = t_train[train_indices], data_train[train_indices]
         has_validation = True
+        
+        # Restore the random state to not affect other operations
+        np.random.set_state(rng_state)
     else:
         t_val, data_val = None, None
         has_validation = False

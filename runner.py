@@ -52,7 +52,7 @@ def setup_logger():
     )
 
 
-def run_experiment(model_name, dataset_type, data_version, config, experiment_id):
+def run_experiment(model_name, dataset_type, data_version, config, experiment_id, experiment_name=None, run_number=None):
     """
     Runs a single experiment with the given configuration.
 
@@ -62,6 +62,8 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
         data_version: Version of data to use (original, noisy, sparse)
         config: Configuration dictionary
         experiment_id: The MLflow experiment ID to log runs to
+        experiment_name: Name of the experiment (for file organization)
+        run_number: Run number identifier (for file organization)
 
     Returns:
         str: The MLflow run ID of the experiment
@@ -304,7 +306,14 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
 
                 # 6. Generate and log plots
                 # Training history plots
-                history_plots = plot_training_history(history, model_name, dataset_type, data_version)
+                history_plots = plot_training_history(
+                    history, 
+                    model_name, 
+                    dataset_type, 
+                    data_version,
+                    experiment_name=experiment_name,
+                    run_number=run_number
+                )
                 # Prediction plot
                 prediction_plot = plot_model_predictions(
                     model_name,
@@ -316,6 +325,8 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                     data_test,
                     predictions,
                     true_func,
+                    experiment_name=experiment_name,
+                    run_number=run_number
                 )
                 # Log all plots
                 log_plots_to_mlflow(history_plots + [prediction_plot])
@@ -353,24 +364,41 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
         raise
 
 
-def save_run_ids(run_ids, experiment_name):
+def save_run_ids(run_ids, experiment_name, run_number=None):
     """
     Save run IDs to a JSON file for later analysis.
 
     Args:
         run_ids: List of run IDs
         experiment_name: Name of the experiment
+        run_number: Run number (optional)
     """
     if not run_ids:
         logger.warning("No run IDs to save")
         return
 
-    # Create output directory
-    os.makedirs("results", exist_ok=True)
-
-    # Generate filename with timestamp
-    timestr = time.strftime("%Y%m%d-%H%M%S")
-    filename = f"results/run_ids_{experiment_name.replace(' ', '_')}_{timestr}.json"
+    # Clean experiment name for safe path usage
+    safe_exp_name = experiment_name.replace(" ", "_").replace("/", "_")
+    
+    # Determine directory and filename
+    if run_number is not None:
+        # Create experiment directory structure
+        exp_dir = f"results/{safe_exp_name}"
+        os.makedirs(exp_dir, exist_ok=True)
+        
+        # Create run directory
+        run_dir = f"{exp_dir}/run_{run_number}"
+        os.makedirs(run_dir, exist_ok=True)
+        
+        # Set filename without timestamp since we have run number
+        filename = f"{run_dir}/run_ids.json"
+    else:
+        # Create results directory if it doesn't exist
+        os.makedirs("results", exist_ok=True)
+        
+        # Generate filename with timestamp for backward compatibility
+        timestr = time.strftime("%Y%m%d-%H%M%S")
+        filename = f"results/run_ids_{safe_exp_name}_{timestr}.json"
 
     # Save to file
     with open(filename, "w") as f:
@@ -381,6 +409,7 @@ def save_run_ids(run_ids, experiment_name):
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "user": os.environ.get("USER", "keirparker"),
                 "count": len(run_ids),
+                "run_number": run_number,
             },
             f,
             indent=2,
@@ -416,6 +445,25 @@ def main():
 
         # Define experiment
         experiment_name = config.get("experiment_name", "FAN_Model_Benchmark")
+        
+        # Get run number if provided in config, otherwise generate a sequential one
+        run_number = config.get("run_number")
+        if run_number is None:
+            # Try to determine the next run number based on existing directories
+            safe_exp_name = experiment_name.replace(" ", "_").replace("/", "_")
+            exp_dir = f"results/{safe_exp_name}"
+            if os.path.exists(exp_dir):
+                existing_runs = [d for d in os.listdir(exp_dir) if d.startswith("run_")]
+                if existing_runs:
+                    # Extract numbers from run_X directories
+                    existing_numbers = [int(d.split("_")[1]) for d in existing_runs if d.split("_")[1].isdigit()]
+                    run_number = max(existing_numbers) + 1 if existing_numbers else 1
+                else:
+                    run_number = 1
+            else:
+                run_number = 1
+            
+            logger.info(f"Automatically assigned run number: {run_number}")
 
         # Get or create the experiment
         client = mlflow.tracking.MlflowClient()
@@ -455,6 +503,8 @@ def main():
                             data_version,
                             config,
                             experiment_id,
+                            experiment_name=experiment_name,
+                            run_number=run_number
                         )
                         all_run_ids.append(run_id)
                     except Exception as e:
@@ -466,12 +516,17 @@ def main():
         logger.info("All experiments completed")
 
         # Save run IDs for later analysis
-        save_run_ids(all_run_ids, experiment_name)
+        save_run_ids(all_run_ids, experiment_name, run_number)
 
         # Generate summary table - make sure it goes to the same experiment
         if all_run_ids:
             logger.info("Generating summary table...")
-            summary_df = generate_model_summary_table(all_run_ids, experiment_name)
+            # Pass explicit experiment_id to ensure proper MLflow logging
+            summary_df = generate_model_summary_table(
+                all_run_ids, 
+                experiment_name, 
+                run_number=run_number
+            )
             if summary_df is not None:
                 logger.info(f"Summary table generated with {len(summary_df)} runs")
             else:
@@ -480,9 +535,12 @@ def main():
             # NEW CODE: Generate loss comparison plots
             logger.info("Generating loss comparison plots...")
 
-            # Training loss comparison
+            # Training loss comparison with no smoothing and markers visible
             train_loss_plot = plot_losses_by_epoch_comparison(
-                run_ids=all_run_ids, metric_name="train_loss", include_validation=False
+                run_ids=all_run_ids, 
+                metric_name="train_loss", 
+                include_validation=True,  # Show validation loss too
+                smooth_factor=None  # No smoothing - show raw data
             )
 
             # # Combined training and validation loss comparison
@@ -498,7 +556,7 @@ def main():
                 if all_run_ids:
                     logger.info("Generating enhanced visualizations...")
                     create_enhanced_visualizations(
-                        all_run_ids, experiment_id, experiment_name
+                        all_run_ids, experiment_id, experiment_name, run_number
                     )
 
 
