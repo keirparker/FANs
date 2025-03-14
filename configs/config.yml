@@ -40,6 +40,7 @@ hyperparameters:
   sparsity_factor: 0.5
   epochs: 3
   lr: 0.00001
+  device: cuda
 
 logging:
   level: "INFO"  # Could be DEBUG, INFO, WARNING, ERROR, etc.
@@ -50,3 +51,7 @@ random_seed: 42
 # 'fast': Maximizes speed on hardware like Tesla V100 GPUs
 # 'deterministic': Ensures reproducible results, but slower
 performance_setting: 'fast'
+
+# Force CUDA even if torch.cuda.is_available() returns False
+# Use this on p3.8x EC2 instances if CUDA detection fails
+force_cuda: true
