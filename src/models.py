@@ -3,12 +3,21 @@ import torch
 import torch.nn as nn
 import math
 
+# Use a module-level variable to track registration status
+_registered_models = set()
 model_registry = {}
 
 def register_model(model_name):
     def decorator(cls):
-        model_registry[model_name] = cls
-        logger.debug(f"Registered model class: {model_name}")
+        # Create a unique global variable name to prevent re-registration
+        global _registered_models
+        
+        # Only register once
+        if model_name not in _registered_models:
+            model_registry[model_name] = cls
+            _registered_models.add(model_name)
+            # Comment out the debug message that's causing log spam
+            # logger.debug(f"Registered model class: {model_name}")
         return cls
     return decorator
 
@@ -376,10 +385,19 @@ class FANLayerPhaseOffsetGated(nn.Module):
 
         self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
         self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
+        
+        # Initialize weights properly to prevent NaN
+        nn.init.xavier_uniform_(self.input_linear_p.weight, gain=0.1)
+        nn.init.xavier_uniform_(self.input_linear_g.weight, gain=0.1)
+        if bias:
+            nn.init.zeros_(self.input_linear_p.bias)
+            nn.init.zeros_(self.input_linear_g.bias)
+            
         self.activation = nn.GELU()
 
-        self.offset = nn.Parameter(torch.full((p_dim,), math.pi / 4))
-        self.gate = nn.Parameter(torch.randn(1, dtype=torch.float32))
+        # Initialize with more stable values
+        self.offset = nn.Parameter(torch.full((p_dim,), 0.1))  # Smaller initial offsets
+        self.gate = nn.Parameter(torch.zeros(1, dtype=torch.float32))  # Start at 0.5 after sigmoid
 
     def forward(self, src):
         p = self.input_linear_p(src)
@@ -403,12 +421,16 @@ class FANLayerPhaseOffsetGated(nn.Module):
 @register_model("FANPhaseOffsetModelGated")
 class FANPhaseOffsetModelGated(nn.Module):
     def __init__(
-            self, input_dim=1, output_dim=1, hidden_dim=2048, num_layers=3, bias=True
-    ):
+            self, input_dim=1, output_dim=1, hidden_dim=1024, num_layers=2, bias=True
+    ):  # Smaller default model for better speed
         super(FANPhaseOffsetModelGated, self).__init__()
         logger.info("Initializing FANPhaseOffsetModelGated ...")
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
+        # Initialize with small values to avoid NaN
+        nn.init.xavier_uniform_(self.embedding.weight, gain=0.1)
+        if bias:
+            nn.init.zeros_(self.embedding.bias)
 
         self.layers = nn.ModuleList()
         for _ in range(num_layers - 1):
@@ -416,7 +438,13 @@ class FANPhaseOffsetModelGated(nn.Module):
                 FANLayerPhaseOffsetGated(hidden_dim, hidden_dim, bias=bias)
             )
 
-        self.layers.append(nn.Linear(hidden_dim, output_dim, bias=bias))
+        self.output_layer = nn.Linear(hidden_dim, output_dim, bias=bias) 
+        # Initialize output layer with small weights
+        nn.init.xavier_uniform_(self.output_layer.weight, gain=0.01)
+        if bias:
+            nn.init.zeros_(self.output_layer.bias)
+            
+        self.layers.append(self.output_layer)
 
     def forward(self, src):
         x = self.embedding(src)

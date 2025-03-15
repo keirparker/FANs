@@ -116,6 +116,9 @@ def select_device(config):
         if torch.backends.mps.is_available():
             device = torch.device("mps")
             logger.info("Using MPS device (Apple Silicon).")
+            # Enable MPS optimizations
+            # Note: Additional MPS optimizations would go here
+            logger.info("Using MPS acceleration for Apple Silicon GPU")
         else:
             logger.warning("MPS requested but not available. Falling back to CPU.")
             device = torch.device("cpu")
@@ -139,6 +142,9 @@ def select_device(config):
         if torch.backends.mps.is_available():
             device = torch.device("mps")
             logger.info("No device specified; using MPS for Apple Silicon.")
+            # Enable MPS optimizations
+            # Note: Additional MPS optimizations would go here
+            logger.info("Using MPS acceleration for Apple Silicon GPU")
         elif cuda_available:
             device = torch.device("cuda")
             logger.info("No device specified; using CUDA.")

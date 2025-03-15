@@ -648,9 +648,20 @@ def prepare_data_loaders(
     Returns:
         tuple: (train_loader, val_loader)
     """
-    # Extract configuration parameters with sensible defaults
-    batch_size = config["hyperparameters"].get("batch_size", 64)
-    num_workers = config["hyperparameters"].get("num_workers", min(4, os.cpu_count() or 1))
+    # Extract configuration parameters with optimized defaults for V100
+    batch_size = config["hyperparameters"].get("batch_size", 256)  # Larger batch size for V100
+    
+    # Calculate optimal num_workers:
+    # - On EC2 p3.8x: use 4 workers as it has strong multi-core CPU
+    # - Default to reasonable number based on system cores
+    if os.environ.get("AWS_EXECUTION_ENV", "").startswith("AWS_ECS"):
+        # We're on AWS - use optimized settings
+        default_workers = 4
+    else:
+        # Scale with available cores, but cap at 8
+        default_workers = min(8, (os.cpu_count() or 4) // 2)
+        
+    num_workers = config["hyperparameters"].get("num_workers", default_workers)
     
     # Don't pin memory if tensors are already on CUDA device
     # This avoids "cannot pin 'torch.cuda.FloatTensor'" error
