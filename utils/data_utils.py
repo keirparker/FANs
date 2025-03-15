@@ -453,8 +453,9 @@ class AdaptiveTimeSeriesDataset(Dataset):
         if len(self.y.shape) == 1:
             self.y = self.y.unsqueeze(-1)
 
-        # Move to device if specified
-        if device is not None:
+        # Only move to device if not CUDA (keep CPU tensors for DataLoader)
+        # This prevents "cannot pin 'torch.cuda.FloatTensor'" errors
+        if device is not None and device.type != 'cuda':
             self.x = self.x.to(device)
             self.y = self.y.to(device)
 
@@ -725,12 +726,13 @@ def prepare_data_loaders(
         train_sampler = torch.utils.data.RandomSampler(train_dataset)
 
     # Create optimized DataLoader with advanced features
+    # Actually create the train loader - always disable pin_memory when device is CUDA
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         sampler=train_sampler,
         num_workers=num_workers,
-        pin_memory=pin_memory,
+        pin_memory=False,  # Always disable pin_memory to prevent CUDA tensor pinning errors
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
         drop_last=drop_last
@@ -752,7 +754,7 @@ def prepare_data_loaders(
             batch_size=batch_size,
             shuffle=False,  # No shuffling for validation
             num_workers=num_workers,
-            pin_memory=pin_memory,
+            pin_memory=False,  # Always disable pin_memory to prevent CUDA tensor pinning errors
             persistent_workers=persistent_workers
         )
 
