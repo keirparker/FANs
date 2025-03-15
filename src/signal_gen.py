@@ -55,13 +55,12 @@ def compressing_expanding_wave_fn(x: np.ndarray) -> np.ndarray:
     """
     # Use direct modulation method for clearer repetition
     
-    # Calculate base carrier signal with high frequency 
-    carrier_freq = 10.0
-    carrier = np.sin(2 * np.pi * carrier_freq * x / 20.0)
+    # Calculate base carrier signal with MUCH higher frequency (20x more repetitions)
+    carrier_freq = 200.0  # Increased from 10 to 200
     
     # Apply slower, obvious modulation to the frequency
     # This modulation creates the compression/expansion effect
-    mod_freq = 2.0  # Higher value creates more repetitions
+    mod_freq = 10.0  # Higher value creates more repetitions (5x more)
     mod_depth = 0.7
     
     # Create a repeating modulation pattern
@@ -84,20 +83,20 @@ def compressing_expanding_wave_fn(x: np.ndarray) -> np.ndarray:
 def increasing_decreasing_amp_fn(x: np.ndarray) -> np.ndarray:
     """
     Generate a wave with an amplitude that increases then decreases repeatedly.
-    Uses a higher frequency carrier with a clear amplitude modulation pattern.
+    Uses a much higher frequency carrier with a clear amplitude modulation pattern.
     """
     # Normalize x for consistent scaling
     x_norm = x / 30.0
     
-    # Use higher frequency for carrier to get more oscillations
-    carrier_freq = 12.0
+    # Use MUCH higher frequency for carrier (20x more oscillations)
+    carrier_freq = 240.0  # Increased from 12 to 240
     
     # Create a carrier wave with constant frequency
     carrier = np.sin(2 * np.pi * carrier_freq * x_norm)
     
     # Define amplitude modulation that rises and falls repeatedly
     # Increase the frequency for more repetitions
-    env_freq = 1.5  # Higher value gives more repetitions
+    env_freq = 10.0  # Much higher for many more repetitions
     
     # Create a periodic amplitude envelope
     amplitude = 0.5 + 0.5 * np.cos(2 * np.pi * env_freq * x_norm)
@@ -113,16 +112,16 @@ def increasing_decreasing_amp_fn(x: np.ndarray) -> np.ndarray:
 def combined_compression_amp_fn(x: np.ndarray) -> np.ndarray:
     """
     Generate a wave that both compresses/expands and has increasing/decreasing amplitude.
-    Combines both effects with higher frequencies for more obvious repetition patterns.
+    Combines both effects with MUCH higher frequencies for many more repetition patterns.
     """
     # Normalize x for consistent scaling
     x_norm = x / 25.0
     
-    # Use higher frequency for base carrier to get more oscillations
-    carrier_freq = 10.0
+    # Use much higher frequency for base carrier (20x more oscillations)
+    carrier_freq = 200.0  # Increased from 10 to 200
     
     # Frequency modulation parameters - for compression/expansion effect
-    freq_mod_rate = 2.0  # Higher value = more compression/expansion cycles
+    freq_mod_rate = 10.0  # Higher value = many more compression/expansion cycles
     freq_mod_depth = 0.6
     
     # Create the time-varying frequency modulation
@@ -135,7 +134,7 @@ def combined_compression_amp_fn(x: np.ndarray) -> np.ndarray:
     carrier = np.sin(2 * np.pi * carrier_freq * t_mod)
     
     # Amplitude modulation parameters
-    amp_mod_rate = 1.0  # Different from freq mod rate for interesting patterns
+    amp_mod_rate = 8.0  # Different from freq mod rate for interesting patterns
     
     # Create amplitude modulation (different phase from frequency modulation)
     amplitude = 0.5 + 0.5 * np.cos(2 * np.pi * amp_mod_rate * x_norm + np.pi/4)
