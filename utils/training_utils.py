@@ -23,6 +23,7 @@ def create_optimizer(model, config):
     Returns:
         torch.optim.Optimizer: Configured optimizer
     """
+    device_type = model.embedding.weight.device.type
     optimizer_type = config["hyperparameters"].get("optimizer", "adam").lower()
     lr = float(config["hyperparameters"].get("lr", 1e-3))
     
@@ -30,6 +31,39 @@ def create_optimizer(model, config):
     weight_decay_raw = config["hyperparameters"].get("weight_decay", 0)
     weight_decay = float(weight_decay_raw) if weight_decay_raw is not None else 0.0
 
+    # Device-specific optimizers
+    if device_type == 'cuda':
+        # For CUDA, use AdamW with higher weight decay
+        if optimizer_type == "adamw" or optimizer_type == "adam":
+            logger.info(f"Using AdamW optimizer with lr={lr} for CUDA")
+            return optim.AdamW(model.parameters(), lr=lr, 
+                              weight_decay=weight_decay if weight_decay > 0 else 1e-4,
+                              eps=1e-8)
+        elif optimizer_type == "sgd":
+            # For SGD on CUDA, use Nesterov acceleration
+            momentum = config["hyperparameters"].get("momentum", 0.9)
+            logger.info(f"Using SGD with Nesterov, momentum={momentum}, lr={lr} for CUDA")
+            return optim.SGD(
+                model.parameters(), lr=lr, momentum=momentum, 
+                weight_decay=weight_decay, nesterov=True
+            )
+    elif device_type == 'mps':
+        # For MPS, stick with Adam for stability
+        if optimizer_type == "adam" or optimizer_type == "adamw":
+            logger.info(f"Using Adam optimizer with lr={lr} for MPS")
+            return optim.Adam(model.parameters(), lr=lr, 
+                             weight_decay=weight_decay if weight_decay > 0 else 1e-5,
+                             eps=1e-7)  # Slightly higher eps for stability
+        elif optimizer_type == "sgd":
+            # For SGD on MPS, use standard momentum
+            momentum = config["hyperparameters"].get("momentum", 0.9)
+            logger.info(f"Using SGD with momentum={momentum}, lr={lr} for MPS")
+            return optim.SGD(
+                model.parameters(), lr=lr, momentum=momentum, 
+                weight_decay=weight_decay, nesterov=False
+            )
+    
+    # Generic fallbacks if device-specific options aren't matched
     if optimizer_type == "adam":
         return optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     elif optimizer_type == "sgd":
@@ -59,19 +93,70 @@ def create_scheduler(optimizer, config):
 
     if not use_scheduler:
         return None
-
-    scheduler_type = config["hyperparameters"].get(
-        "scheduler_type", "reduce_on_plateau"
-    )
-    patience = config["hyperparameters"].get("scheduler_patience", 5)
-    factor = config["hyperparameters"].get("scheduler_factor", 0.5)
-
+        
+    # Get device type from optimizer to customize scheduler
+    device_type = 'cpu'
+    for param_group in optimizer.param_groups:
+        if len(param_group['params']) > 0:
+            device_type = param_group['params'][0].device.type
+            break
+            
+    scheduler_type = config["hyperparameters"].get("scheduler_type", "reduce_on_plateau")
+    epochs = int(config["hyperparameters"].get("epochs", 100))
+    
+    # Device-specific scheduler configurations
+    if device_type == 'cuda':
+        # For CUDA, use more aggressive learning rate adjustments
+        if scheduler_type == "reduce_on_plateau":
+            patience = config["hyperparameters"].get("scheduler_patience", 5)
+            factor = config["hyperparameters"].get("scheduler_factor", 0.2)  # More aggressive reduction
+            logger.info(f"Using ReduceLROnPlateau for CUDA with patience={patience}, factor={factor}")
+            return optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="min", factor=factor, patience=patience, verbose=True, 
+                min_lr=1e-6, threshold=1e-4
+            )
+        elif scheduler_type == "cosine":
+            logger.info(f"Using CosineAnnealingWarmRestarts for CUDA with T_0={epochs//3}")
+            # Use warm restarts for CUDA
+            return optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer, T_0=epochs//3, T_mult=1, eta_min=1e-6
+            )
+        elif scheduler_type == "step":
+            step_size = int(config["hyperparameters"].get("scheduler_step_size", 10))
+            factor = float(config["hyperparameters"].get("scheduler_factor", 0.3))
+            logger.info(f"Using StepLR for CUDA with step_size={step_size}, gamma={factor}")
+            return optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=factor)
+            
+    elif device_type == 'mps':
+        # For MPS, use gentler learning rate adjustments for stability
+        if scheduler_type == "reduce_on_plateau":
+            patience = config["hyperparameters"].get("scheduler_patience", 10)  # More patience
+            factor = config["hyperparameters"].get("scheduler_factor", 0.5)  # Gentler reduction
+            logger.info(f"Using ReduceLROnPlateau for MPS with patience={patience}, factor={factor}")
+            return optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="min", factor=factor, patience=patience, verbose=True,
+                min_lr=1e-6, threshold=1e-4
+            )
+        elif scheduler_type == "cosine":
+            logger.info(f"Using CosineAnnealingLR for MPS with T_max={epochs}")
+            # Standard cosine for MPS
+            return optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=epochs, eta_min=1e-6
+            )
+        elif scheduler_type == "step":
+            step_size = int(config["hyperparameters"].get("scheduler_step_size", 15))  # Larger step size
+            factor = float(config["hyperparameters"].get("scheduler_factor", 0.7))  # Gentler reduction
+            logger.info(f"Using StepLR for MPS with step_size={step_size}, gamma={factor}")
+            return optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=factor)
+    
+    # Generic fallbacks
     if scheduler_type == "reduce_on_plateau":
+        patience = config["hyperparameters"].get("scheduler_patience", 5)
+        factor = config["hyperparameters"].get("scheduler_factor", 0.5)
         return optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=factor, patience=patience, verbose=True
         )
     elif scheduler_type == "cosine":
-        epochs = int(config["hyperparameters"].get("epochs", 10))
         return optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=epochs
         )
@@ -242,17 +327,61 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
         t_val, data_val = None, None
         has_validation = False
 
-    # Prepare data loaders
-    pin_memory = True  # Always use pin_memory for better performance
-    config["hyperparameters"]["pin_memory"] = pin_memory
+    # Prepare data loaders with device-specific optimizations
+    config["hyperparameters"]["pin_memory"] = True  # Use pin_memory by default
     
-    # Use reasonable defaults
-    if device and device.type == 'mps':
-        # Moderate batch size to maintain stability
-        if config["hyperparameters"].get("batch_size", 64) < 64:
+    # Device-specific optimizations
+    if device and device.type == 'cuda':
+        # CUDA-specific settings
+        logger.info("Using CUDA-optimized parameters")
+        # Larger batch size for CUDA
+        if "batch_size" not in config["hyperparameters"]:
+            config["hyperparameters"]["batch_size"] = 128
+        # More workers for CUDA (1 per GPU + 2)
+        config["hyperparameters"]["num_workers"] = min(torch.cuda.device_count() * 2 + 2, 8)
+        # Higher learning rate for CUDA
+        if "lr" not in config["hyperparameters"]:
+            config["hyperparameters"]["lr"] = 1e-3
+        # Clip at 5.0 for stability but allow larger gradients
+        config["hyperparameters"]["clip_value"] = 5.0
+        # Enable AMP for faster training
+        config["hyperparameters"]["use_amp"] = True
+        
+    elif device and device.type == 'mps':
+        # MPS-specific settings (Apple Silicon)
+        logger.info("Using MPS-optimized parameters")
+        # Moderate batch size for MPS
+        if "batch_size" not in config["hyperparameters"]:
             config["hyperparameters"]["batch_size"] = 64
-        # Use a reasonable number of workers
+        # 2 workers is optimal for most Apple chips
         config["hyperparameters"]["num_workers"] = 2
+        # Slightly lower learning rate for MPS stability
+        if "lr" not in config["hyperparameters"]:
+            config["hyperparameters"]["lr"] = 5e-4
+        # Tighter gradient clipping for MPS
+        config["hyperparameters"]["clip_value"] = 1.0
+        # Try to enable AMP for newer PyTorch versions
+        config["hyperparameters"]["use_amp"] = True
+        
+    else:
+        # CPU-specific settings
+        logger.info("Using CPU-optimized parameters")
+        # Smaller batch size for CPU
+        if "batch_size" not in config["hyperparameters"]:
+            config["hyperparameters"]["batch_size"] = 32
+        # Just 1 worker for CPU to avoid overhead
+        config["hyperparameters"]["num_workers"] = 1
+        # Lower learning rate for CPU
+        if "lr" not in config["hyperparameters"]:
+            config["hyperparameters"]["lr"] = 1e-4
+        # Standard clipping for CPU
+        config["hyperparameters"]["clip_value"] = 1.0
+    
+    # Log the device-specific settings
+    logger.info(f"Batch size: {config['hyperparameters']['batch_size']}")
+    logger.info(f"Workers: {config['hyperparameters']['num_workers']}")
+    logger.info(f"Learning rate: {config['hyperparameters']['lr']}")
+    logger.info(f"Gradient clip: {config['hyperparameters']['clip_value']}")
     
     train_loader, val_loader = prepare_data_loaders(t_train, data_train, config, t_val, data_val, device)
 
@@ -262,18 +391,34 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
     scheduler = create_scheduler(optimizer, config)
     num_epochs = int(config["hyperparameters"].get("epochs", 10))
     
-    # Enable Automatic Mixed Precision (AMP) for faster training on CUDA
+    # Enable Automatic Mixed Precision (AMP) for faster training
     # Make sure we parse the use_amp setting correctly from the config
     use_amp_raw = config["hyperparameters"].get("use_amp", False)
     use_amp = (use_amp_raw is True or 
-              (isinstance(use_amp_raw, str) and use_amp_raw.lower() == 'true')) and device.type == 'cuda'
+              (isinstance(use_amp_raw, str) and use_amp_raw.lower() == 'true'))
     
-    # Create gradient scaler for mixed precision - only used with CUDA
-    if device.type == 'cuda':
-        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    # Create gradient scaler for mixed precision
+    if device.type == 'cuda' and use_amp:
+        # Use the new recommended API for CUDA
+        scaler = torch.amp.GradScaler(device_type='cuda', enabled=True)
+        logger.info("Using CUDA AMP gradient scaler")
+    elif device.type == 'mps' and use_amp:
+        # MPS also supports mixed precision in newer PyTorch versions
+        try:
+            # Try to use MPS AMP if available
+            scaler = torch.amp.GradScaler(device_type='mps', enabled=True)
+            logger.info("Using MPS AMP gradient scaler")
+        except (ValueError, RuntimeError, AttributeError):
+            # Fallback if MPS AMP not supported in this PyTorch version
+            logger.warning("MPS AMP not supported in this PyTorch version, disabling")
+            scaler = None
+            use_amp = False
     else:
-        # Dummy scaler for MPS or CPU that will be ignored
+        # Dummy scaler for CPU that will be ignored
         scaler = None
+        # Disable AMP for CPU
+        if device.type == 'cpu':
+            use_amp = False
 
     # History tracking
     history = {
@@ -312,25 +457,31 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
             
             # Forward pass with optimizations for CUDA and MPS
             if device.type == 'cuda' and use_amp:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast(device_type='cuda'):
                     preds = model(x_batch)
                     loss = criterion(preds, y_batch)
-            elif device.type == 'mps':
-                # MPS optimized path - direct forward pass
-                preds = model(x_batch)
-                loss = criterion(preds, y_batch)
+            elif device.type == 'mps' and use_amp:
+                # Try MPS AMP if enabled
+                try:
+                    with torch.amp.autocast(device_type='mps'):
+                        preds = model(x_batch)
+                        loss = criterion(preds, y_batch)
+                except (ValueError, RuntimeError, AttributeError):
+                    # Fallback if autocast fails
+                    preds = model(x_batch)
+                    loss = criterion(preds, y_batch)
             else:
-                # CPU path
+                # CPU path or MPS without AMP
                 preds = model(x_batch)
                 loss = criterion(preds, y_batch)
             
-            # Backward pass with gradient scaling for mixed precision (CUDA only)
-            if device.type == 'cuda' and use_amp and scaler is not None:
+            # Backward pass with gradient scaling for mixed precision
+            if (device.type == 'cuda' or device.type == 'mps') and use_amp and scaler is not None:
                 # GPU path with mixed precision
                 scaler.scale(loss).backward()
                 
                 # Optional gradient clipping
-                if config["hyperparameters"].get("clip_gradients", False):
+                if config["hyperparameters"].get("clip_gradients", True):
                     clip_value = float(config["hyperparameters"].get("clip_value", 1.0))
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
@@ -339,7 +490,7 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                # Standard backward pass (CPU or MPS)
+                # Standard backward pass (CPU or MPS without AMP)
                 loss.backward()
                 
                 # Apply gradient clipping for all devices to ensure stable training
@@ -366,14 +517,25 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                         x_val = x_val.to(device, non_blocking=True)
                         y_val = y_val.to(device, non_blocking=True)
                     
-                    # Mixed precision for validation too (CUDA only)
+                    # Mixed precision for validation too
                     if device.type == 'cuda' and use_amp:
-                        with torch.cuda.amp.autocast():
+                        with torch.amp.autocast(device_type='cuda'):
                             val_preds = model(x_val)
                             val_batch_loss = criterion(val_preds, y_val).item()
+                    elif device.type == 'mps' and use_amp:
+                        # Try MPS AMP for validation if enabled
+                        try:
+                            with torch.amp.autocast(device_type='mps'):
+                                val_preds = model(x_val)
+                                val_batch_loss = criterion(val_preds, y_val).item()
+                        except (ValueError, RuntimeError, AttributeError):
+                            # Fallback if autocast fails
+                            val_preds = model(x_val)
+                            val_loss_tensor = criterion(val_preds, y_val)
+                            val_batch_loss = val_loss_tensor.item()
                     else:
+                        # CPU path or MPS without AMP
                         val_preds = model(x_val)
-                        # Simplified validation loss calculation - less checking for performance
                         val_loss_tensor = criterion(val_preds, y_val)
                         val_batch_loss = val_loss_tensor.item()
                     
