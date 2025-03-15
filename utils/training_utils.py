@@ -399,14 +399,14 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
     
     # Create gradient scaler for mixed precision
     if device.type == 'cuda' and use_amp:
-        # Use the new recommended API for CUDA
-        scaler = torch.amp.GradScaler(device_type='cuda', enabled=True)
+        # Use regular GradScaler without device_type (works with all PyTorch versions)
+        scaler = torch.amp.GradScaler(enabled=True)
         logger.info("Using CUDA AMP gradient scaler")
     elif device.type == 'mps' and use_amp:
         # MPS also supports mixed precision in newer PyTorch versions
         try:
-            # Try to use MPS AMP if available
-            scaler = torch.amp.GradScaler(device_type='mps', enabled=True)
+            # Try to use regular GradScaler for MPS
+            scaler = torch.amp.GradScaler(enabled=True)
             logger.info("Using MPS AMP gradient scaler")
         except (ValueError, RuntimeError, AttributeError):
             # Fallback if MPS AMP not supported in this PyTorch version
@@ -457,17 +457,25 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
             
             # Forward pass with optimizations for CUDA and MPS
             if device.type == 'cuda' and use_amp:
-                with torch.amp.autocast(device_type='cuda'):
-                    preds = model(x_batch)
-                    loss = criterion(preds, y_batch)
+                try:
+                    # Try the newer API first
+                    with torch.amp.autocast(device_type='cuda'):
+                        preds = model(x_batch)
+                        loss = criterion(preds, y_batch)
+                except TypeError:
+                    # Fall back to the older API if device_type param not supported
+                    with torch.amp.autocast():
+                        preds = model(x_batch)
+                        loss = criterion(preds, y_batch)
             elif device.type == 'mps' and use_amp:
                 # Try MPS AMP if enabled
                 try:
+                    # First try newer API with device_type
                     with torch.amp.autocast(device_type='mps'):
                         preds = model(x_batch)
                         loss = criterion(preds, y_batch)
-                except (ValueError, RuntimeError, AttributeError):
-                    # Fallback if autocast fails
+                except (ValueError, RuntimeError, AttributeError, TypeError):
+                    # Fallback to standard computation
                     preds = model(x_batch)
                     loss = criterion(preds, y_batch)
             else:
@@ -519,16 +527,24 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                     
                     # Mixed precision for validation too
                     if device.type == 'cuda' and use_amp:
-                        with torch.amp.autocast(device_type='cuda'):
-                            val_preds = model(x_val)
-                            val_batch_loss = criterion(val_preds, y_val).item()
+                        try:
+                            # Try the newer API first
+                            with torch.amp.autocast(device_type='cuda'):
+                                val_preds = model(x_val)
+                                val_batch_loss = criterion(val_preds, y_val).item()
+                        except TypeError:
+                            # Fall back to the older API if device_type param not supported
+                            with torch.amp.autocast():
+                                val_preds = model(x_val)
+                                val_batch_loss = criterion(val_preds, y_val).item()
                     elif device.type == 'mps' and use_amp:
                         # Try MPS AMP for validation if enabled
                         try:
+                            # First try newer API with device_type
                             with torch.amp.autocast(device_type='mps'):
                                 val_preds = model(x_val)
                                 val_batch_loss = criterion(val_preds, y_val).item()
-                        except (ValueError, RuntimeError, AttributeError):
+                        except (ValueError, RuntimeError, AttributeError, TypeError):
                             # Fallback if autocast fails
                             val_preds = model(x_val)
                             val_loss_tensor = criterion(val_preds, y_val)
