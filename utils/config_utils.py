@@ -98,7 +98,9 @@ def setup_environment(config):
                 # Use larger workspace for faster performance
                 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16384:8"
                 # Use all available CPU threads
-                torch.set_num_threads(0)  # 0 means use all available threads
+                import multiprocessing
+                num_threads = multiprocessing.cpu_count()
+                torch.set_num_threads(num_threads)  # Set to actual CPU count
                 
                 # Disable deterministic algorithms for speed
                 try:
