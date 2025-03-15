@@ -1,12 +1,12 @@
 experiment_name: "reproduce2"
 
 models_to_run:
-  - FANPhaseOffsetModelGated
+#  - FANPhaseOffsetModelGated
 #  - FANAmplitudePhaseModel
 #  - FANMultiFrequencyModel
 #  - FANUnconstrainedBasisModel
-#  - FANPhaseOffsetModel
-  - FANGated
+  - FANPhaseOffsetModel
+#  - FANGated
 #  - FAN
 #  - MLP
 #  - FANPhaseOffsetModelGated
@@ -20,9 +20,12 @@ datasets_to_run:
 #  - sin
 #  - increasing_amp_freq
 #  - mod
-  - complex_2
+#  - complex_2
 #  - complex_1
 #  - complex_4
+  - combined_compression_amp
+  - increasing_decreasing_amp
+  - compressing_expanding_wave
 
 
 data_versions:
