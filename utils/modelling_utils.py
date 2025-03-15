@@ -57,14 +57,26 @@ def train_model(model, t_train, data_train, config, device):
 
     num_epochs = config["hyperparameters"].get("epochs", 10)
     batch_size = min(64, len(x_tensor))  # Just an example
-    dataset = torch.utils.data.TensorDataset(x_tensor, y_tensor)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    
+    # Create CPU tensors for the dataloader to avoid pin_memory issues
+    x_tensor_cpu = x_tensor.cpu()
+    y_tensor_cpu = y_tensor.cpu()
+    
+    dataset = torch.utils.data.TensorDataset(x_tensor_cpu, y_tensor_cpu)
+    dataloader = torch.utils.data.DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=True,
+        pin_memory=False  # Disable pin_memory to prevent CUDA tensor pinning errors
+    )
 
     model.train()
     for epoch in range(num_epochs):
         running_loss = 0.0
         for x_batch, y_batch in dataloader:
-            # x_batch, y_batch already on 'device' since DataLoader is pulling from GPU Tensors
+            # Move batch to device (CPU tensors to GPU)
+            x_batch = x_batch.to(device, non_blocking=True)
+            y_batch = y_batch.to(device, non_blocking=True)
             optimizer.zero_grad()
             preds = model(x_batch)  # Forward pass
             loss = criterion(preds, y_batch)
