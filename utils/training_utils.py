@@ -246,7 +246,10 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
         t_val, data_val = None, None
         has_validation = False
 
-    # Prepare data loaders
+    # Prepare data loaders - disable pin_memory on CUDA since tensors are already on device
+    pin_memory = False if device and device.type == 'cuda' else True
+    config["hyperparameters"]["pin_memory"] = pin_memory
+    
     train_loader, val_loader = prepare_data_loaders(
         t_train, data_train, config, t_val, data_val, device
     )

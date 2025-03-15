@@ -650,7 +650,13 @@ def prepare_data_loaders(
     # Extract configuration parameters with sensible defaults
     batch_size = config["hyperparameters"].get("batch_size", 64)
     num_workers = config["hyperparameters"].get("num_workers", min(4, os.cpu_count() or 1))
-    pin_memory = config["hyperparameters"].get("pin_memory", device is not None and device.type == "cuda")
+    
+    # Don't pin memory if tensors are already on CUDA device
+    # This avoids "cannot pin 'torch.cuda.FloatTensor'" error
+    pin_memory = config["hyperparameters"].get("pin_memory", False)
+    if device is not None and device.type == "cuda":
+        pin_memory = False
+    
     persistent_workers = config["hyperparameters"].get("persistent_workers", num_workers > 0)
     precision = config["hyperparameters"].get("precision", "float32")
     prefetch_factor = config["hyperparameters"].get("prefetch_factor", 2)
