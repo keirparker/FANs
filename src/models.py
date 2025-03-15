@@ -395,9 +395,9 @@ class FANLayerPhaseOffsetGated(nn.Module):
             
         self.activation = nn.GELU()
 
-        # Initialize with more stable values
-        self.offset = nn.Parameter(torch.full((p_dim,), 0.1))  # Smaller initial offsets
-        self.gate = nn.Parameter(torch.zeros(1, dtype=torch.float32))  # Start at 0.5 after sigmoid
+        # Initialize with original values
+        self.offset = nn.Parameter(torch.full((p_dim,), math.pi/4))  # Original offset value
+        self.gate = nn.Parameter(torch.randn(1, dtype=torch.float32))  # Random initial value
 
     def forward(self, src):
         p = self.input_linear_p(src)
@@ -421,14 +421,14 @@ class FANLayerPhaseOffsetGated(nn.Module):
 @register_model("FANPhaseOffsetModelGated")
 class FANPhaseOffsetModelGated(nn.Module):
     def __init__(
-            self, input_dim=1, output_dim=1, hidden_dim=1024, num_layers=2, bias=True
-    ):  # Smaller default model for better speed
+            self, input_dim=1, output_dim=1, hidden_dim=2048, num_layers=3, bias=True
+    ):  # Return to original parameters
         super(FANPhaseOffsetModelGated, self).__init__()
         logger.info("Initializing FANPhaseOffsetModelGated ...")
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
-        # Initialize with small values to avoid NaN
-        nn.init.xavier_uniform_(self.embedding.weight, gain=0.1)
+        # Initialize with standard values (default gain=1.0)
+        nn.init.xavier_uniform_(self.embedding.weight)
         if bias:
             nn.init.zeros_(self.embedding.bias)
 
@@ -439,8 +439,8 @@ class FANPhaseOffsetModelGated(nn.Module):
             )
 
         self.output_layer = nn.Linear(hidden_dim, output_dim, bias=bias) 
-        # Initialize output layer with small weights
-        nn.init.xavier_uniform_(self.output_layer.weight, gain=0.01)
+        # Initialize output layer with standard weights
+        nn.init.xavier_uniform_(self.output_layer.weight)
         if bias:
             nn.init.zeros_(self.output_layer.bias)
             

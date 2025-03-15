@@ -246,13 +246,13 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
     pin_memory = True  # Always use pin_memory for better performance
     config["hyperparameters"]["pin_memory"] = pin_memory
     
-    # Optimize for Apple Silicon
+    # Use reasonable defaults
     if device and device.type == 'mps':
-        # Increase batch size for better MPS performance
-        if config["hyperparameters"].get("batch_size", 64) < 128:
-            config["hyperparameters"]["batch_size"] = 128
-        # Use more workers for data loading
-        config["hyperparameters"]["num_workers"] = 4
+        # Moderate batch size to maintain stability
+        if config["hyperparameters"].get("batch_size", 64) < 64:
+            config["hyperparameters"]["batch_size"] = 64
+        # Use a reasonable number of workers
+        config["hyperparameters"]["num_workers"] = 2
     
     train_loader, val_loader = prepare_data_loaders(t_train, data_train, config, t_val, data_val, device)
 
@@ -342,9 +342,9 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                 # Standard backward pass (CPU or MPS)
                 loss.backward()
                 
-                # Efficient gradient clipping - only on MPS where we had NaN issues
-                if device.type == 'mps':
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                # Apply gradient clipping for all devices to ensure stable training
+                clip_value = float(config["hyperparameters"].get("clip_value", 1.0))
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
                 
                 # Standard weight update
                 optimizer.step()
