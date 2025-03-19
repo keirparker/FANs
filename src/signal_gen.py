@@ -48,140 +48,124 @@ def increasing_amp_freq_fn(x: np.ndarray) -> np.ndarray:
 
     return signal
 
-def compressing_expanding_wave_fn(x: np.ndarray) -> np.ndarray:
+def gradually_increasing_frequency_fn(x: np.ndarray) -> np.ndarray:
     """
-    Generate a wave that compresses and expands periodically like a sound wave.
-    The wave's frequency changes smoothly in a sinusoidal pattern with many repetitions.
+    Generate a wave with a frequency that slowly increases from low to high
+    across the domain. This creates a non-repeating pattern that gradually
+    becomes more compressed toward the right edge.
+    
+    FREQUENCY REDUCED FOR BETTER VISUALIZATION
     """
-    # Use direct modulation method for clearer repetition
+    x_min, x_max = np.min(x), np.max(x)
+    position = (x - x_min) / (x_max - x_min)
     
-    # Calculate base carrier signal with MUCH higher frequency (20x more repetitions)
-    carrier_freq = 200.0  # Increased from 10 to 200
+    # REDUCED FREQUENCIES by a factor of 75 (5 × 15)
+    base_freq = 0.133   # was 10.0, then 2.0, now 10.0/75
+    max_freq = 2.0   # was 150.0, then 30.0, now 150.0/75
     
-    # Apply slower, obvious modulation to the frequency
-    # This modulation creates the compression/expansion effect
-    mod_freq = 10.0  # Higher value creates more repetitions (5x more)
-    mod_depth = 0.7
+    freq_factor = 1 / (1 + np.exp(-10 * (position - 0.7)))
+    instantaneous_freq = base_freq + (max_freq - base_freq) * freq_factor
     
-    # Create a repeating modulation pattern
-    modulation = np.cos(2 * np.pi * mod_freq * x / 20.0)
+    dx = np.mean(np.diff(x)) if len(x) > 1 else 1.0
+    phase = np.cumsum(instantaneous_freq * dx)
+    phase = phase - phase[0]
     
-    # Apply the modulation to create the signal with varying frequency
-    # When modulation is 1, we get high frequency (compressed)
-    # When modulation is 0, we get normal frequency
-    # When modulation is -1, we get low frequency (expanded)
-    t_mod = x * (1 + mod_depth * modulation) 
-    
-    # Generate final signal with compressed/expanded waves
-    signal = np.sin(2 * np.pi * carrier_freq * t_mod / 20.0)
-    
-    # Ensure signal is properly normalized
+    signal = np.sin(2 * np.pi * phase)
     signal = np.clip(signal, -1.0, 1.0)
     
     return signal
 
-def increasing_decreasing_amp_fn(x: np.ndarray) -> np.ndarray:
+def gradually_increasing_amplitude_fn(x: np.ndarray) -> np.ndarray:
     """
-    Generate a wave with an amplitude that increases then decreases repeatedly.
-    Uses a much higher frequency carrier with a clear amplitude modulation pattern.
+    Generate a wave with an amplitude that slowly increases from near zero to 1.0 
+    at the furthest right point. This function creates a non-repeating pattern 
+    that gradually expands to full amplitude.
+    
+    FREQUENCY REDUCED FOR BETTER VISUALIZATION
     """
-    # Normalize x for consistent scaling
-    x_norm = x / 30.0
+    x_min, x_max = np.min(x), np.max(x)
+    # Reduced carrier frequency by a factor of 6
+    carrier_freq = 30.0  # was 180.0
+    carrier = np.sin(2 * np.pi * carrier_freq * x / 60.0)
     
-    # Use MUCH higher frequency for carrier (20x more oscillations)
-    carrier_freq = 240.0  # Increased from 12 to 240
+    position = (x - x_min) / (x_max - x_min)
+    amplitude = 0.02 + 0.98 * (1 / (1 + np.exp(-10 * (position - 0.7))))
     
-    # Create a carrier wave with constant frequency
-    carrier = np.sin(2 * np.pi * carrier_freq * x_norm)
-    
-    # Define amplitude modulation that rises and falls repeatedly
-    # Increase the frequency for more repetitions
-    env_freq = 10.0  # Much higher for many more repetitions
-    
-    # Create a periodic amplitude envelope
-    amplitude = 0.5 + 0.5 * np.cos(2 * np.pi * env_freq * x_norm)
-    
-    # Apply the amplitude envelope to the carrier signal
     signal = amplitude * carrier
-    
-    # Clip to ensure there are no extreme values
     signal = np.clip(signal, -1.0, 1.0)
     
     return signal
 
-def combined_compression_amp_fn(x: np.ndarray) -> np.ndarray:
+def combined_freq_amp_modulation_fn(x: np.ndarray) -> np.ndarray:
     """
-    Generate a wave that both compresses/expands and has increasing/decreasing amplitude.
-    Combines both effects with MUCH higher frequencies for many more repetition patterns.
+    Generate a wave that combines both gradually increasing frequency and amplitude.
+    This function creates a signal that becomes both higher in frequency and amplitude
+    from left to right.
+    
+    FREQUENCY REDUCED FOR BETTER VISUALIZATION
     """
-    # Normalize x for consistent scaling
-    x_norm = x / 25.0
+    x_min, x_max = np.min(x), np.max(x)
+    position = (x - x_min) / (x_max - x_min)
     
-    # Use much higher frequency for base carrier (20x more oscillations)
-    carrier_freq = 200.0  # Increased from 10 to 200
+    # Frequency modulation parameters - REDUCED BY FACTOR OF 75 (5 × 15)
+    base_freq = 0.133   # was 10.0, then 2.0, now 10.0/75
+    max_freq = 2.0   # was 150.0, then 30.0, now 150.0/75
+    freq_factor = 1 / (1 + np.exp(-10 * (position - 0.7)))
+    instantaneous_freq = base_freq + (max_freq - base_freq) * freq_factor
     
-    # Frequency modulation parameters - for compression/expansion effect
-    freq_mod_rate = 10.0  # Higher value = many more compression/expansion cycles
-    freq_mod_depth = 0.6
+    # Integrate frequency to get phase
+    dx = np.mean(np.diff(x)) if len(x) > 1 else 1.0
+    phase = np.cumsum(instantaneous_freq * dx)
+    phase = phase - phase[0]
     
-    # Create the time-varying frequency modulation
-    freq_modulation = np.cos(2 * np.pi * freq_mod_rate * x_norm)
+    # Amplitude modulation
+    amplitude = 0.02 + 0.98 * (1 / (1 + np.exp(-10 * (position - 0.7))))
     
-    # Modify time based on frequency modulation
-    t_mod = x_norm * (1 + freq_mod_depth * freq_modulation)
-    
-    # Generate the carrier with time-varying frequency
-    carrier = np.sin(2 * np.pi * carrier_freq * t_mod)
-    
-    # Amplitude modulation parameters
-    amp_mod_rate = 8.0  # Different from freq mod rate for interesting patterns
-    
-    # Create amplitude modulation (different phase from frequency modulation)
-    amplitude = 0.5 + 0.5 * np.cos(2 * np.pi * amp_mod_rate * x_norm + np.pi/4)
-    
-    # Apply both amplitude and frequency modulation
-    signal = amplitude * carrier
-    
-    # Clip to ensure there are no extreme values
+    signal = amplitude * np.sin(2 * np.pi * phase)
     signal = np.clip(signal, -1.0, 1.0)
     
     return signal
 
 
-##############################################################################
-# PERIODIC_SPECS holds all domain & data logic for each type.
-# 'config' is an optional sub-dict for any extra metadata (batchsize, etc.).
-##############################################################################
+# PERIODIC_SPECS holds domain parameters and data functions for each signal type
 PERIODIC_SPECS = {
     "sin": {
-        "period": 6,
-        "domain_train": lambda p, ns: np.linspace(-10*p*np.pi, 10*p*np.pi, ns),
-        "domain_test":  lambda p, ns: np.linspace(-25*p*np.pi, 25*p*np.pi, ns),
-        "data_fn":      lambda t: np.sin(t),
-        "config": {
+        "data_params": {
+            "period": 6,
+            "domain_train": lambda p, ns: np.linspace(-10*p*np.pi, 10*p*np.pi, ns),
+            "domain_test":  lambda p, ns: np.linspace(-25*p*np.pi, 25*p*np.pi, ns),
+        },
+        "training_params": {
             "batchsize": 32,
             "numepoch": 10000,
             "printepoch": 50,
             "lr": 1e-5,
             "wd": 0.01,
-            "y_uper": 1.5,
+        },
+        "viz_params": {
+            "y_upper": 1.5,
             "y_lower": -1.5,
-        }
+        },
+        "data_fn": lambda t: np.sin(t),
     },
     "mod": {
-        "period": 20,
-        "domain_train": lambda p, ns: np.linspace(-10*p, 10*p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-25*p, 25*p, ns),
-        "data_fn":      lambda t: np.mod(t, 5),
-        "config": {
+        "data_params": {
+            "period": 20,
+            "domain_train": lambda p, ns: np.linspace(-10*p, 10*p, ns),
+            "domain_test":  lambda p, ns: np.linspace(-25*p, 25*p, ns),
+        },
+        "training_params": {
             "batchsize": 32,
             "numepoch": 10000,
             "printepoch": 50,
             "lr": 1e-5,
             "wd": 0.01,
-            "y_uper": 10,
+        },
+        "viz_params": {
+            "y_upper": 10,
             "y_lower": -5,
-        }
+        },
+        "data_fn": lambda t: np.mod(t, 5),
     },
     "complex_1": {
         "period": 4,
@@ -288,11 +272,11 @@ PERIODIC_SPECS = {
             "y_lower": -1.0,
         }
     },
-    "compressing_expanding_wave": {
-        "period": 2,  # Smaller period = more repetitions
-        "domain_train": lambda p, ns: np.linspace(-10*p, 10*p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-25*p, 25*p, ns),
-        "data_fn":      compressing_expanding_wave_fn,
+    "gradually_increasing_frequency": {
+        "period": 5,  # Larger period for more room to show frequency increase
+        "domain_train": lambda p, ns: np.linspace(-5*p, 15*p, ns),  # Asymmetric range
+        "domain_test":  lambda p, ns: np.linspace(-10*p, 25*p, ns), # Extend further right for testing
+        "data_fn":      gradually_increasing_frequency_fn,
         "config": {
             "batchsize": 64,
             "numepoch": 5000,
@@ -303,11 +287,11 @@ PERIODIC_SPECS = {
             "y_lower": -1.0,
         }
     },
-    "increasing_decreasing_amp": {
-        "period": 2,  # Smaller period = more repetitions
-        "domain_train": lambda p, ns: np.linspace(-10*p, 10*p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-25*p, 25*p, ns),
-        "data_fn":      increasing_decreasing_amp_fn,
+    "gradually_increasing_amplitude": {
+        "period": 5,  # Larger period to show the full amplitude increase
+        "domain_train": lambda p, ns: np.linspace(-5*p, 15*p, ns),  # Asymmetric range
+        "domain_test":  lambda p, ns: np.linspace(-10*p, 25*p, ns), # Extend further right for testing
+        "data_fn":      gradually_increasing_amplitude_fn,
         "config": {
             "batchsize": 64,
             "numepoch": 5000,
@@ -318,49 +302,68 @@ PERIODIC_SPECS = {
             "y_lower": -1.0,
         }
     },
-    "combined_compression_amp": {
-        "period": 2,  # Smaller period = more repetitions
-        "domain_train": lambda p, ns: np.linspace(-10*p, 10*p, ns),
-        "domain_test":  lambda p, ns: np.linspace(-25*p, 25*p, ns),
-        "data_fn":      combined_compression_amp_fn,
-        "config": {
+    "combined_freq_amp_modulation": {
+        "data_params": {
+            "period": 5,  # Match other gradually increasing functions
+            "domain_train": lambda p, ns: np.linspace(-5*p, 15*p, ns),  # Asymmetric range
+            "domain_test":  lambda p, ns: np.linspace(-10*p, 25*p, ns), # Extend further right for testing
+        },
+        "training_params": {
             "batchsize": 64,
             "numepoch": 5000,
             "printepoch": 50,
-            "lr": 1e-4,  # More stable learning rate
-            "wd": 0.001,  # Increased weight decay for better stability
-            "y_uper": 1.0,
+            "lr": 1e-4,
+            "wd": 0.001,
+        },
+        "viz_params": {
+            "y_upper": 1.0,
             "y_lower": -1.0,
-        }
+        },
+        "data_fn": combined_freq_amp_modulation_fn,
     }
 }
 
 
-##############################################################################
-# 2) get_periodic_data: a single function with minimal repetition
-#    It returns up to 6 values: 
-#      (t_train, data_train, t_test, data_test, config, true_func)
-##############################################################################
 def get_periodic_data(periodic_type, num_train_samples=None, num_test_samples=None):
     """
     Retrieve training and test data for a given periodic type.
 
     Returns:
       t_train, data_train, t_test, data_test, config, true_func
-
-    The 'true_func' is the same as 'data_fn' in the dictionary, which you can
-    use to evaluate the ground-truth signal at any x-values for comparison.
     """
     if periodic_type not in PERIODIC_SPECS:
         logger.error(f"Unknown periodic_type: {periodic_type}")
         raise ValueError(f"Unsupported periodic_type: {periodic_type}")
 
     spec = PERIODIC_SPECS[periodic_type]
-    period = spec["period"]
-    domain_train = spec["domain_train"]
-    domain_test = spec["domain_test"]
+    
+    # Handle both old and new format specs
+    if "data_params" in spec:
+        # New format with separated parameter groups
+        data_params = spec["data_params"]
+        period = data_params["period"]
+        domain_train = data_params["domain_train"]
+        domain_test = data_params["domain_test"]
+        
+        # Merge training and visualization params for backward compatibility
+        config = {}
+        if "training_params" in spec:
+            config.update(spec["training_params"])
+        if "viz_params" in spec:
+            config.update(spec["viz_params"])
+            
+        # Rename viz params to match old format
+        if "y_upper" in config:
+            config["y_uper"] = config.pop("y_upper")
+    else:
+        # Old format - direct access
+        period = spec["period"]
+        domain_train = spec["domain_train"]
+        domain_test = spec["domain_test"]
+        config = spec["config"]  # e.g., batchsize, etc.
+    
+    # Data function is always at the top level
     data_fn = spec["data_fn"]
-    config = spec["config"]  # e.g., batchsize, etc.
 
     # Decide how many samples if none provided
     if num_train_samples is None:
@@ -368,21 +371,18 @@ def get_periodic_data(periodic_type, num_train_samples=None, num_test_samples=No
     if num_test_samples is None:
         num_test_samples = 4000
         
-    # Special handling for increasing_amp_freq to ensure train/test consistency
-    if periodic_type == "increasing_amp_freq":
-        # Use the same domain for training and testing for this specific function
+    # Special handling for gradual changing functions
+    if periodic_type in ["increasing_amp_freq", "gradually_increasing_amplitude", 
+                         "gradually_increasing_frequency", "combined_freq_amp_modulation"]:
         min_x, max_x = -50, 50
         
-        # Generate training data - evenly spaced points
         t_train = np.linspace(min_x, max_x, num_train_samples)
         data_train = data_fn(t_train)
         
-        # Generate test data - use more points in the same range for smooth testing
-        # Also add some extrapolation regions for testing generalization
         t_test = np.concatenate([
-            np.linspace(min_x - 20, min_x, num_test_samples // 4),  # Below training range
-            np.linspace(min_x, max_x, num_test_samples // 2),       # Same as training range
-            np.linspace(max_x, max_x + 20, num_test_samples // 4)   # Above training range
+            np.linspace(min_x - 20, min_x, num_test_samples // 4),
+            np.linspace(min_x, max_x, num_test_samples // 2),
+            np.linspace(max_x, max_x + 20, num_test_samples // 4)
         ])
         data_test = data_fn(t_test)
     else:
@@ -393,40 +393,8 @@ def get_periodic_data(periodic_type, num_train_samples=None, num_test_samples=No
         t_test = domain_test(period, num_test_samples)
         data_test = data_fn(t_test)
 
-    # The 'true_func' is just data_fn if you want to use it as ground truth
     true_func = data_fn
-
     return t_train, data_train, t_test, data_test, config, true_func
-
-#
-# if __name__ == "__main__":
-#     """
-#     This main section visualizes the new wave functions to verify their behavior.
-#     Run this file directly to see the plots of these functions.
-#     """
-#     import matplotlib.pyplot as plt
-#     from matplotlib.gridspec import GridSpec
-#
-#     # Set up the figure with GridSpec for nice layout
-#     plt.figure(figsize=(15, 15))
-#     gs = GridSpec(3, 1, height_ratios=[1, 1, 1])
-#
-#     # Generate data for all our new functions
-#     x = np.linspace(-50, 50, 1000)
-#     y_compress = compressing_expanding_wave_fn(x)
-#     y_amp = increasing_decreasing_amp_fn(x)
-#     y_combined = combined_compression_amp_fn(x)
-#
-#     # Plot 1: Compressing and expanding wave
-#     ax1 = plt.subplot(gs[0])
-#     ax1.plot(x, y_compress, 'b-', linewidth=1.5, alpha=0.8)
-#     ax1.set_title("Compressing and Expanding Wave (Frequency Modulation)")
-#     ax1.set_ylabel("Amplitude")
-#     ax1.grid(True)
-#
-#     # Annotate compression and expansion regions
-#     for i in range(-3, 4, 2):
-#         # Mark compressed regions (high frequency)
 #         region_start = i * 15 - 5
 #         region_end = i * 15 + 5
 #         section = (x > region_start) & (x < region_end)
