@@ -1,49 +1,42 @@
-experiment_name: "reproduce2"
+experiment_name: "new graphs"
 
 models_to_run:
-#  - FANPhaseOffsetModelGated
-#  - FANAmplitudePhaseModel
-#  - FANMultiFrequencyModel
-#  - FANUnconstrainedBasisModel
+  - MLP
+  - FAN
+  - FANGated
   - FANPhaseOffsetModel
-#  - FANGated
-#  - FAN
-#  - MLP
-#  - FANPhaseOffsetModelGated
-#  - FANPhaseOffsetModel
-#  - FANGated
-#  - FAN
-#  - MLP
+  - FANPhaseOffsetModelGated
+  - FANAmplitudePhaseModel
+  - FANUnconstrainedBasisModel
 
 datasets_to_run:
-#  - complex_3
-#  - sin
-#  - increasing_amp_freq
-#  - mod
-#  - complex_2
-#  - complex_1
-#  - complex_4
-  - combined_compression_amp
-  - increasing_decreasing_amp
-  - compressing_expanding_wave
+  - sin
+  - mod
+  - complex_1
+  - complex_2
+  - complex_3
+  - complex_4
+  - combined_freq_amp_modulation
+  - gradually_increasing_amplitude
+  - gradually_increasing_frequency
 
 
 data_versions:
   - original
-#  - noisy
+  - noisy
 #  - sparse
 
 hyperparameters:
   # Hardware-adaptive hyperparameters (works for both CUDA and MPS)
-  early_stopping: false
+  early_stopping: False
   early_stopping_patience: 300
   early_stopping_min_delta: 0.000001
   num_samples: 50000
   test_samples: 10000
   noise_level: 0.15
   sparsity_factor: 0.5
-  epochs: 100
-  lr: 0.001              # Higher learning rate for faster convergence
+  epochs: 10000
+  lr: 0.00001              # Higher learning rate for faster convergence
   weight_decay: 0.00001   # L2 regularization for better generalization (as float)
   batch_size: 256         # Larger batch size for better hardware utilization
   num_workers: 4          # Use multiple CPU workers for data loading

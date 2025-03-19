@@ -250,7 +250,11 @@ def generate_model_summary_table(run_ids, experiment_name, run_number=None):
             "test_r2",
             "test_rmse",
             "test_mae",
-            "test_mape",
+            "test_mse",
+            "flops",
+            "mflops",
+            "num_params",
+            "inference_time_ms",
             "training_time_seconds",
             "last_epoch",
             "last epoch",
@@ -348,7 +352,9 @@ def generate_model_summary_table(run_ids, experiment_name, run_number=None):
             "test_r2",
             "test_rmse",
             "test_mae",
-            "test_mape",
+            "test_mse",
+            "mflops",  # Highlight models with lowest computational requirements
+            "inference_time_ms",  # Highlight fastest models
             "final_train_loss",
             "final_val_loss",
         ]
@@ -421,12 +427,21 @@ def generate_model_summary_table(run_ids, experiment_name, run_number=None):
                     value = row[col]
 
                     # Format numeric values
-                    if col in ["test_r2", "test_rmse", "test_mae", "test_mape"]:
+                    if col in ["test_r2", "test_rmse", "test_mae", "test_mse"]:
                         if pd.notnull(value):
                             value = f"{value:.4f}"
-                    elif col == "test_mape":
+                    elif col == "flops":
+                        if pd.notnull(value):
+                            value = f"{value:,.0f}"  # Format with commas for large numbers
+                    elif col == "mflops":
                         if pd.notnull(value):
                             value = f"{value:.2f}"
+                    elif col == "num_params":
+                        if pd.notnull(value):
+                            value = f"{value:,.0f}"  # Format with commas for large numbers
+                    elif col == "inference_time_ms":
+                        if pd.notnull(value):
+                            value = f"{value:.3f}"
                     elif col in ["training_time_seconds"]:
                         if pd.notnull(value):
                             value = f"{value:.2f}"

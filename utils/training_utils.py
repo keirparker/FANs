@@ -278,16 +278,11 @@ def compute_metrics(y_true, y_pred):
     ss_res = np.sum((y_true - y_pred) ** 2)
     r2 = 1 - (ss_res / (ss_tot + 1e-10))
 
-    # Mean Absolute Percentage Error
-    # Add small epsilon to avoid division by zero
-    mape = np.mean(np.abs((y_true - y_pred) / (np.abs(y_true) + 1e-10))) * 100
-
     return {
         "mse": float(mse),
         "rmse": float(rmse),
         "mae": float(mae),
         "r2": float(r2),
-        "mape": float(mape),
     }
 def train_model(model, t_train, data_train, config, device, validation_split=0.2):
     """

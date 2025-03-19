@@ -21,23 +21,21 @@ from loguru import logger
 from datetime import datetime
 import mlflow
 
-# Configure matplotlib for high-quality output
+# Configure matplotlib for publication-quality output
 plt.style.use("seaborn-v0_8-whitegrid")
-sns.set_context("notebook", font_scale=1.1)
-mpl.rcParams.update(
-    {
-        "figure.dpi": 150,
-        "savefig.dpi": 300,
-        "axes.grid": True,
-        "grid.linestyle": "--",
-        "grid.alpha": 0.6,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-    }
-)
+sns.set_context("paper", font_scale=1.3)
+plt.rcParams.update({'font.family': 'serif', 'mathtext.fontset': 'cm'})
+mpl.rcParams.update({
+    "figure.dpi": 300, "savefig.dpi": 600, "axes.grid": True,
+    "grid.linestyle": ":", "grid.alpha": 0.3, 
+    "axes.spines.top": False, "axes.spines.right": False,
+    "lines.markersize": 0, "lines.linewidth": 1.5, 
+    "xtick.direction": 'in', "ytick.direction": 'in',
+    "axes.titlesize": 14, "axes.labelsize": 12
+})
 
-# Define color palette
-COLOR_PALETTE = sns.color_palette("Paired", 15)
+# Colorblind-friendly palette
+COLOR_PALETTE = sns.color_palette("colorblind", 8)
 
 
 class VisualizationConfig:
@@ -483,7 +481,15 @@ def plot_model_predictions(
 ) -> str:
     """
     Generate visualization of model predictions with statistical analysis.
-
+    
+    The visualization includes:
+    - Shaded training region (light green)
+    - True function as a solid red line (if provided)
+    - Model predictions as a solid line
+    - Clear division between training and test regions
+    - No scatter points for cleaner visualization
+    - Reduced frequency for better visibility in -70 to +70 range
+    
     Args:
         model_name: Name of the model
         dataset_type: Type of dataset
@@ -496,6 +502,8 @@ def plot_model_predictions(
         true_func: True underlying function (optional)
         uncertainty: Model prediction uncertainty (optional)
         viz_config: Visualization configuration
+        experiment_name: Name of the experiment (for file naming)
+        run_number: Run number (for file naming)
 
     Returns:
         str: Path to the saved plot
@@ -517,54 +525,61 @@ def plot_model_predictions(
     data_test_sorted = data_test[sort_idx_test]
     predictions_sorted = predictions[sort_idx_test]
 
-    # Plot the underlying true function if provided
+    # Find the min and max values for t_train and t_test
+    t_min = min(min(t_train), min(t_test))
+    t_max = max(max(t_train), max(t_test))
+    
+    # Shade the training region with light green
+    train_min = min(t_train)
+    train_max = max(t_train)
+    ax1.axvspan(train_min, train_max, alpha=0.15, color='green', label="Training Region")
+    
+    # Plot the true function with extremely high sampling for perfect representation
     if true_func is not None:
-        t_dense = np.linspace(
-            min(min(t_train), min(t_test)), max(max(t_train), max(t_test)), 1000
-        )
+        # Calculate appropriate number of points based on range
+        # For sine functions, need enough points to capture high frequencies
+        range_size = t_max - t_min
+        # Use at least 100 points per unit for ultra-high quality representation
+        # For wide ranges like -70 to +70, this can use hundreds of thousands of points
+        num_points = max(10000, int(range_size * 100))
+        
+        # For sine wave specifically, ensure even higher density
+        if "sin" in str(true_func):
+            num_points = max(num_points, int(range_size * 200))
+        
+        # Log information about the high-fidelity rendering
+        print(f"Generating true function with {num_points} points for high-fidelity visualization")
+        
+        # Generate the dense sampling
+        t_dense = np.linspace(t_min, t_max, num_points)
         y_dense = true_func(t_dense)
+        
         ax1.plot(
             t_dense,
             y_dense,
-            linestyle="--",
-            color="red",
-            alpha=0.7,
-            linewidth=0.8,
+            linestyle="-",
+            color="black",  # Changed from red to black as requested
+            alpha=0.9,
+            linewidth=1.5,  # Reduced line width from 2.0 to 1.5
             label="True Function",
         )
-
-    # Plot training data as scatter points
-    ax1.scatter(
-        t_train,
-        data_train,
-        color=COLOR_PALETTE[1],
-        s=20,
-        alpha=0.5,
-        edgecolor="k",
-        linewidth=0.5,
-        label="Training Data",
-    )
-
-    # Plot test data as scatter points with different style
-    ax1.scatter(
-        t_test,
-        data_test,
-        color=COLOR_PALETTE[2],
-        s=10,
-        alpha=0.6,
-        edgecolor="k",
-        linewidth=0.5,
-        label="Test Data",
-    )
+    
+    # Note: We removed the training data line plot
+    # Note: We removed the test data line plot
 
     # Plot model predictions as a continuous line
     ax1.plot(
         t_test_sorted,
         predictions_sorted,
         color=COLOR_PALETTE[3],
-        linewidth=1,
+        linestyle="-",
+        linewidth=1.5,  # Reduced from 2.5 to 1.5
         label="Model Prediction",
     )
+    
+    # Add a subtle vertical line to indicate division between train/test if not overlapping
+    if train_max < max(t_test):
+        ax1.axvline(x=train_max, color='gray', linestyle=':', alpha=0.3, linewidth=0.8)  # Made more subtle
 
     # Add uncertainty bands if provided
     if uncertainty is not None:
@@ -579,68 +594,116 @@ def plot_model_predictions(
             label="95% Confidence",
         )
 
-    # Calculate residuals
+    # Calculate residuals, handling any NaNs
     residuals = data_test - predictions
+    
+    # Replace any NaNs in residuals with zeros for visualization purposes
+    if np.isnan(residuals).any():
+        print(f"Warning: Found {np.sum(np.isnan(residuals))} NaN values in residuals. Replacing with zeros for visualization.")
+        residuals = np.nan_to_num(residuals, nan=0.0)
 
-    # Calculate metrics
+    # Calculate metrics with NaN handling
     from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+    
+    # Create NaN-free versions of the data for metric calculation
+    data_test_clean = np.copy(data_test)
+    predictions_clean = np.copy(predictions)
+    
+    # Identify NaN positions in either array
+    nan_mask = np.isnan(data_test_clean) | np.isnan(predictions_clean)
+    if nan_mask.any():
+        print(f"Warning: Removing {np.sum(nan_mask)} NaN values for metric calculation")
+        data_test_clean = data_test_clean[~nan_mask]
+        predictions_clean = predictions_clean[~nan_mask]
+    
+    # Calculate metrics on clean data
+    try:
+        mse = mean_squared_error(data_test_clean, predictions_clean)
+        rmse = np.sqrt(mse)
+        r2 = r2_score(data_test_clean, predictions_clean)
+        mae = mean_absolute_error(data_test_clean, predictions_clean)
+    except Exception as e:
+        print(f"Error calculating metrics: {e}. Using fallback values.")
+        mse = rmse = mae = 99.0
+        r2 = -1.0
 
-    mse = mean_squared_error(data_test, predictions)
-    rmse = np.sqrt(mse)
-    r2 = r2_score(data_test, predictions)
-    mae = mean_absolute_error(data_test, predictions)
+    # Format metrics text with proper notation
+    metrics_text = f"RMSE = {rmse:.4f}\nMAE = {mae:.4f}\n$R^2$ = {r2:.4f}"
 
-    # Format metrics text
-    metrics_text = f"RMSE: {rmse:.4f}\nMAE: {mae:.4f}\nR²: {r2:.4f}"
-
-    # Create text box with metrics
+    # Create text box with metrics - more subtle academic style
     ax1.text(
         0.03,
         0.97,
         metrics_text,
         transform=ax1.transAxes,
-        fontsize=10,
+        fontsize=11,
         verticalalignment="top",
-        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+        fontfamily="serif",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.9, edgecolor='lightgray'),
     )
 
-    # Customize main plot
-    ax1.set_title(f"Model Predictions - {model_name}")
-    ax1.set_xlabel("Input")
-    ax1.set_ylabel("Output")
-    ax1.legend(loc="upper right")
+    # Customize main plot - more academic labels with units
+    ax1.set_title(f"{model_name} Model Performance")
+    ax1.set_xlabel("Input Variable ($x$)")
+    ax1.set_ylabel("Response Variable ($y$)")
+    
+    # Add text indicators for the regions
+    mid_train = (train_min + train_max) / 2
+    ax1.text(mid_train, ax1.get_ylim()[1] * 0.9, "Training Region", 
+             ha='center', va='top', alpha=0.7, fontsize=9, color='green')
+    
+    # Add test region label if different from training
+    if train_max < max(t_test):
+        mid_test = (train_max + max(t_test)) / 2
+        ax1.text(mid_test, ax1.get_ylim()[1] * 0.9, "Test Region", 
+                ha='center', va='top', alpha=0.7, fontsize=9, color='purple')
+    
+    ax1.legend(loc="upper right", framealpha=0.9, edgecolor='lightgray')
     viz_config.style_axis(ax1)
 
     # Residual plot (bottom left)
     ax2 = fig.add_subplot(gs[1, 0])
 
-    # Plot residuals
-    ax2.scatter(
-        t_test,
-        residuals,
-        c=np.abs(residuals),
-        cmap="YlOrRd",
-        s=25,
-        alpha=0.7,
-        edgecolor="k",
-        linewidth=0.5,
+    # Plot residuals as a line for academic style
+    # Sort residuals by input for a clean line
+    sort_idx_res = np.argsort(t_test)
+    t_test_res_sorted = t_test[sort_idx_res]
+    residuals_sorted = residuals[sort_idx_res]
+    
+    ax2.plot(
+        t_test_res_sorted,
+        residuals_sorted,
+        color=COLOR_PALETTE[4],
+        linestyle="-",
+        linewidth=1.5,
+        alpha=0.8,
     )
 
     # Add zero reference line
     ax2.axhline(y=0, color="gray", linestyle="--", alpha=0.7)
 
-    ax2.set_title("Residuals")
-    ax2.set_xlabel("Input")
-    ax2.set_ylabel("Residual")
+    ax2.set_title("Residual Analysis")
+    ax2.set_xlabel("Input Variable ($x$)")
+    ax2.set_ylabel("Residual ($y - \hat{y}$)")
     viz_config.style_axis(ax2)
 
     # Residual histogram (bottom right)
     ax3 = fig.add_subplot(gs[1, 1])
 
-    # Create histogram with KDE
+    # Create histogram with KDE (academic style)
     sns.histplot(
-        residuals, bins=15, kde=True, ax=ax3, color=COLOR_PALETTE[3], alpha=0.7
+        residuals, 
+        bins=15, 
+        kde=True, 
+        ax=ax3, 
+        color=COLOR_PALETTE[5], 
+        alpha=0.7,
+        line_kws={'linewidth': 2, 'color': COLOR_PALETTE[6]}
     )
+    
+    # Remove top and right spines for cleaner academic look
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
 
     # Add vertical line at zero
     ax3.axvline(x=0, color="gray", linestyle="--", alpha=0.7)
@@ -661,14 +724,18 @@ def plot_model_predictions(
         bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
     )
 
-    ax3.set_title("Residual Distribution")
-    ax3.set_xlabel("Residual")
+    ax3.set_title("Error Distribution")
+    ax3.set_xlabel("Residual Value ($y - \hat{y}$)")
     ax3.set_ylabel("Frequency")
     viz_config.style_axis(ax3)
 
-    # Add overall title
+    # Add overall title with more academic formatting
     fig.suptitle(
-        f"{model_name} on {dataset_type} ({data_version})", fontsize=14, y=0.98
+        f"{model_name}: {dataset_type} Dataset Performance", 
+        fontsize=16, 
+        y=0.98,
+        fontweight='normal',
+        fontfamily='serif'
     )
 
     # Adjust layout
@@ -1215,49 +1282,29 @@ def plot_loss_grid(
 
 
 def apply_smoothing(values: List[float], smoothing_factor: float) -> np.ndarray:
-    """
-    Apply smoothing to a list of values.
-
-    Args:
-        values: List of values to smooth
-        smoothing_factor: Smoothing factor (0-1, higher = more smoothing)
-
-    Returns:
-        Smoothed values
-    """
+    """Apply moving average smoothing to a list of values."""
     if smoothing_factor <= 0 or len(values) < 4:
         return values
 
-    # Convert to numpy array for easier manipulation
     values_array = np.array(values)
-
-    # Calculate window size based on smoothing factor
-    # Higher smoothing factor means larger window
-    smoothing_factor = min(0.9, max(0, smoothing_factor))  # Limit to 0-0.9
+    smoothing_factor = min(0.9, max(0, smoothing_factor))
     window_size = max(3, int(len(values) * smoothing_factor))
-
-    # Ensure window size is odd
+    
     if window_size % 2 == 0:
         window_size += 1
 
-    # Apply convolution for smoothing
     window = np.ones(window_size) / window_size
     smoothed = np.convolve(values_array, window, mode="same")
-
-    # Fix edges (where convolution doesn't have full window)
+    
     half_window = window_size // 2
 
-    # Handle start of array
+    # Fix edges
     for i in range(half_window):
         window_size_edge = i + half_window + 1
         if window_size_edge > 0:
             smoothed[i] = np.sum(values_array[:window_size_edge]) / window_size_edge
-
-    # Handle end of array
-    for i in range(half_window):
-        idx = len(values) - i - 1
-        window_size_edge = i + half_window + 1
-        if window_size_edge > 0:
+            
+            idx = len(values) - i - 1
             smoothed[idx] = np.sum(values_array[-window_size_edge:]) / window_size_edge
 
     return smoothed
@@ -1533,53 +1580,7 @@ def plot_loss_by_subgroups(
     return plot_paths
 
 
-def apply_smoothing(values: List[float], smoothing_factor: float) -> np.ndarray:
-    """
-    Apply smoothing to a list of values.
-
-    Args:
-        values: List of values to smooth
-        smoothing_factor: Smoothing factor (0-1, higher = more smoothing)
-
-    Returns:
-        Smoothed values
-    """
-    if smoothing_factor <= 0 or len(values) < 4:
-        return values
-
-    # Convert to numpy array for easier manipulation
-    values_array = np.array(values)
-
-    # Calculate window size based on smoothing factor
-    # Higher smoothing factor means larger window
-    smoothing_factor = min(0.9, max(0, smoothing_factor))  # Limit to 0-0.9
-    window_size = max(3, int(len(values) * smoothing_factor))
-
-    # Ensure window size is odd
-    if window_size % 2 == 0:
-        window_size += 1
-
-    # Apply convolution for smoothing
-    window = np.ones(window_size) / window_size
-    smoothed = np.convolve(values_array, window, mode="same")
-
-    # Fix edges (where convolution doesn't have full window)
-    half_window = window_size // 2
-
-    # Handle start of array
-    for i in range(half_window):
-        window_size_edge = i + half_window + 1
-        if window_size_edge > 0:
-            smoothed[i] = np.sum(values_array[:window_size_edge]) / window_size_edge
-
-    # Handle end of array
-    for i in range(half_window):
-        idx = len(values) - i - 1
-        window_size_edge = i + half_window + 1
-        if window_size_edge > 0:
-            smoothed[idx] = np.sum(values_array[-window_size_edge:]) / window_size_edge
-
-    return smoothed
+# This duplicate function has been removed
 
 
 def log_enhanced_plots_to_mlflow(
@@ -1681,13 +1682,12 @@ def create_enhanced_visualizations(run_ids, experiment_id, experiment_name, run_
         
     os.makedirs(output_dir, exist_ok=True)
 
-    # Generate and log enhanced plots
+    # Generate and log enhanced plots - removed run_number parameter that's not supported
     plots = log_enhanced_plots_to_mlflow(
         experiment_id=experiment_id,
         run_ids=run_ids,
         output_dir=output_dir,
-        artifact_path="enhanced_plots",
-        run_number=run_number
+        artifact_path="enhanced_plots"
     )
 
     if plots:

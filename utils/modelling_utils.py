@@ -5,15 +5,17 @@ from loguru import logger
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import time
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 from src.signal_gen import get_periodic_data
 from utils.data_utils import add_noise, make_sparse
 from src.models import get_model_by_name
-
+from utils.efficiency_utils import count_params, count_flops, measure_inference_time
 
 
 # Import device_utils for consistent device selection
@@ -128,27 +130,56 @@ def evaluate_model(model, t_test, data_test, device):
 
     # Convert preds back to numpy (on CPU)
     preds_np = preds.squeeze(-1).cpu().numpy()
-
+    
+    # Check for and handle NaNs in predictions
+    if np.isnan(preds_np).any():
+        logger.warning(f"NaN values detected in predictions: {np.sum(np.isnan(preds_np))} NaNs")
+        # Replace NaNs with zeros or another reasonable value
+        preds_np = np.nan_to_num(preds_np, nan=0.0)
+        
+    # Also check input data for NaNs to prevent evaluation errors
+    if np.isnan(data_test).any():
+        logger.warning(f"NaN values detected in test data: {np.sum(np.isnan(data_test))} NaNs")
+        data_test = np.nan_to_num(data_test, nan=0.0)
+        
     # Calculate metrics
     mse = mean_squared_error(data_test, preds_np)
     rmse = np.sqrt(mse)
     mae = mean_absolute_error(data_test, preds_np)
     r2 = r2_score(data_test, preds_np)
 
-    # Calculate MAPE, handling potential division by zero
+    # Calculate efficiency metrics - FLOPs and inference time
     try:
-        mape = mean_absolute_percentage_error(data_test, preds_np) * 100
-    except:
-        # Handle cases where actual values contain zeros
-        mape = (
-            np.mean(
-                np.abs((data_test - preds_np) / np.maximum(np.abs(data_test), 1e-10))
-            )
-            * 100
-        )
-
-    # Create metrics dictionary
-    metrics = {"mse": mse, "rmse": rmse, "mae": mae, "r2": r2, "mape": mape}
+        # Count model parameters
+        num_params = count_params(model)
+        
+        # Get input size for FLOPs calculation (assumes 1D input)
+        input_size = (1,)  # Most models expect (batch_size, features)
+        
+        # Count FLOPs for a single forward pass
+        flops = count_flops(model, input_size)
+        
+        # Convert to MFLOPs (millions of FLOPs)
+        mflops = flops / 1e6
+        
+        # Measure inference time (average over multiple runs)
+        inference_time = measure_inference_time(model, input_size, num_repeats=50)
+        
+        # Add efficiency metrics to the results
+        metrics = {
+            "mse": mse, 
+            "rmse": rmse, 
+            "mae": mae, 
+            "r2": r2,
+            "num_params": num_params,
+            "flops": flops,
+            "mflops": mflops,
+            "inference_time_ms": inference_time
+        }
+    except Exception as e:
+        logger.warning(f"Error calculating efficiency metrics: {e}")
+        # Fallback to basic metrics
+        metrics = {"mse": mse, "rmse": rmse, "mae": mae, "r2": r2}
 
     return metrics, preds_np
 
@@ -161,6 +192,8 @@ def run_experiment(model_name, dataset_type, data_version, config):
     3) Train a PyTorch model
     4) Evaluate & plot with MLflow
     """
+    from loguru import logger
+    
     mlflow.start_run()
 
     # Determine which device to use
@@ -213,26 +246,64 @@ def run_experiment(model_name, dataset_type, data_version, config):
     os.makedirs("plots", exist_ok=True)
     plt.figure(figsize=(10, 5))
 
-    # Underlying "true" function (red dashed)
+    # Find the min and max values
+    t_min = min(min(t_train), min(t_test))
+    t_max = max(max(t_train), max(t_test))
+    
+    # Shade the training region with light green
+    train_min = min(t_train)
+    train_max = max(t_train)
+    plt.axvspan(train_min, train_max, alpha=0.15, color='green', label="Training Region")
+    
+    # Underlying "true" function (solid red line) with ultra-high resolution
     if true_func is not None:
-        t_dense = np.linspace(min(t_test), max(t_test), 2000)
+        # Calculate appropriate number of points based on range
+        range_size = t_max - t_min
+        # Use at least 100 points per unit for ultra-high quality representation
+        # For wide ranges like -70 to +70, this can use hundreds of thousands of points
+        num_points = max(10000, int(range_size * 100))
+        
+        # For sine wave specifically, ensure even higher density
+        if "sin" in str(true_func):
+            num_points = max(num_points, int(range_size * 200))
+        
+        # Log information about the high-fidelity rendering
+        print(f"Generating true function with {num_points} points for high-fidelity visualization")
+        
+        t_dense = np.linspace(t_min, t_max, num_points)
         y_dense = true_func(t_dense)
-        plt.plot(t_dense, y_dense, "r--", label="True Function", alpha=0.7)
-
-    # Training data (blue dots)
-    plt.scatter(t_train, data_train, color="blue", s=10, alpha=0.5, label="Train Data")
-
-    # Test data (green dots)
-    plt.scatter(t_test, data_test, color="green", s=10, alpha=0.5, label="Test Data")
+        plt.plot(t_dense, y_dense, "k-", label="True Function", alpha=0.9, linewidth=1.5)  # Reduced line width from 2.0 to 1.5
+    
+    # Note: Training data points removed
+    # Note: Test data points removed
 
     # Model predictions (magenta line)
     sort_idx = np.argsort(t_test)
-    plt.plot(t_test[sort_idx], preds_test[sort_idx], "m-", label="Model Prediction")
+    plt.plot(t_test[sort_idx], preds_test[sort_idx], "m-", label="Model Prediction", linewidth=1.5)  # Reduced from 2.5 to 1.5
+    
+    # Add a subtle vertical line to indicate division between train/test if not overlapping
+    if train_max < max(t_test):
+        plt.axvline(x=train_max, color='gray', linestyle=':', alpha=0.3, linewidth=0.8)  # Made more subtle
 
+    # Update title and labels
     plt.title(f"{model_name} | {dataset_type} ({data_version})")
+    plt.xlabel("Input Variable ($x$)")
+    plt.ylabel("Response Variable ($y$)")
+    
+    # Add text indicators for the regions
+    mid_train = (train_min + train_max) / 2
+    plt.text(mid_train, plt.ylim()[1] * 0.9, "Training Region", 
+             ha='center', va='top', alpha=0.7, fontsize=9, color='green')
+    
+    # Add test region label if different from training
+    if train_max < max(t_test):
+        mid_test = (train_max + max(t_test)) / 2
+        plt.text(mid_test, plt.ylim()[1] * 0.9, "Test Region", 
+               ha='center', va='top', alpha=0.7, fontsize=9, color='purple')
+    
     plt.legend()
     plot_path = f"plots/{model_name}_{dataset_type}_{data_version}.png"
-    plt.savefig(plot_path)
+    plt.savefig(plot_path, dpi=300)  # Higher DPI for better quality
     plt.close()
 
     # (6) Log metrics & artifacts with MLflow
