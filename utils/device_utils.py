@@ -248,10 +248,14 @@ def detect_gpu_capabilities():
     return gpu_info
 
 
-def setup_aws_p3dn_environment():
+def setup_aws_p3dn_environment(conservative=True):
     """
     Configure environment variables for optimal performance on AWS p3dn.24xlarge instances.
     These settings are specifically tuned for instances with 8x Tesla V100 GPUs and EFA networking.
+    
+    Args:
+        conservative (bool): If True, initially use only a single GPU to avoid CUDA errors,
+                           GPUs will be expanded later in training_utils.py
     """
     # NCCL configuration for high-speed networks
     os.environ["NCCL_DEBUG"] = "INFO"  # Enable NCCL debug info
@@ -266,7 +270,16 @@ def setup_aws_p3dn_environment():
     
     # CUDA optimizations
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # Match IDs with nvidia-smi
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(8))  # Up to 8 GPUs
+    
+    # For conservative start, use only GPU 0 initially
+    if conservative:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Start with just one GPU
+        logger.info("Conservative mode: starting with only GPU 0")
+    else:
+        # Use all 8 GPUs right away
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(8))
+        logger.info("Performance mode: using all 8 GPUs")
+    
     os.environ["CUDA_CACHE_DISABLE"] = "0"  # Enable JIT cache
     os.environ["CUDA_AUTO_BOOST"] = "0"  # Disable autoboost for consistent performance
     
@@ -278,6 +291,14 @@ def setup_aws_p3dn_environment():
     # Distributed training optimizations
     os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"  # Debug info for distributed
     os.environ["TORCH_CPP_LOG_LEVEL"] = "INFO"  # More verbose logging
+    
+    # Make sure we don't crash with multiple GPUs
+    try:
+        import torch
+        torch.cuda.init()  # Explicitly initialize CUDA
+        torch.cuda.set_device(0)  # Start with device 0
+    except:
+        logger.warning("Could not initialize CUDA directly")
     
     logger.info("Configured environment variables for AWS p3dn.24xlarge")
 
@@ -343,7 +364,7 @@ def select_device(config):
     if gpu_info['is_aws'] and gpu_info['aws_instance_type'] == 'p3dn.24xlarge':
         # Configure for AWS p3dn.24xlarge with 8x Tesla V100 GPUs
         logger.info("Optimizing for AWS p3dn.24xlarge instance")
-        setup_aws_p3dn_environment()
+        setup_aws_p3dn_environment(conservative=True)  # Start with conservative mode for stability
         
         # Check if p3dn optimization is explicitly enabled in config
         aws_p3dn_optimization = config.get("hyperparameters", {}).get("aws_p3dn_optimization", True)

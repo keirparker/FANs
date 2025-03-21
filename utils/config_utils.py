@@ -5,6 +5,12 @@ Configuration utilities for the ML experimentation framework.
 
 import yaml
 import os
+# IMPORTANT: Set CUDA environment variables before importing PyTorch and torch
+# This avoids issues with CUDA device initialization on p3dn.24xlarge
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Start with only one GPU to avoid errors
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # Match IDs with nvidia-smi
+
 from loguru import logger
 import random
 import numpy as np
@@ -67,6 +73,19 @@ def setup_environment(config):
 
     # Configure logger
     setup_logging(config)
+    
+    # Safe CUDA initialization before any multi-GPU setup
+    # This helps avoid device errors on multi-GPU systems
+    if torch.cuda.is_available():
+        # Set back to device 0 to avoid CUDA errors
+        torch.cuda.set_device(0)
+        
+        # CUDA is available, check if we need to adjust visible devices
+        if config.get("hyperparameters", {}).get("aws_max_gpus", 0) > 0:
+            max_gpus = config["hyperparameters"]["aws_max_gpus"]
+            visible_devices = ",".join(str(i) for i in range(min(max_gpus, torch.cuda.device_count())))
+            os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
+            logger.info(f"Limiting to {max_gpus} GPUs: CUDA_VISIBLE_DEVICES={visible_devices}")
     
     # Performance mode settings from config
     # Valid values: 'fast' (maximizes speed), 'deterministic' (ensures reproducibility)
