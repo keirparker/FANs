@@ -190,6 +190,53 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                 model = get_model_by_name(model_name)
                 model.to(device)
 
+                # Set up optimizer and scheduler early for checkpoint loading
+                optimizer = create_optimizer(model, config)
+                scheduler = create_scheduler(optimizer, config)
+                
+                # Check for existing checkpoint to resume training
+                resume_training = config.get("resume_training", False)
+                start_epoch = 0
+                checkpoint_dir = os.path.join("models", "checkpoints")
+                
+                if resume_training:
+                    # Look for best model checkpoint first, then most recent epoch
+                    best_model_path = os.path.join(checkpoint_dir, "best_model.pt")
+                    
+                    if os.path.exists(best_model_path):
+                        # Try to resume from best model
+                        checkpoint_path = best_model_path
+                        logger.info(f"Found best model checkpoint, attempting to resume training")
+                    else:
+                        # Look for the latest epoch checkpoint
+                        checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.startswith("checkpoint_epoch_")]
+                        if checkpoint_files:
+                            # Sort by epoch number
+                            latest_checkpoint = sorted(checkpoint_files, key=lambda x: int(x.split("_")[-1].split(".")[0]))[-1]
+                            checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
+                            logger.info(f"Found latest checkpoint: {latest_checkpoint}")
+                        else:
+                            checkpoint_path = None
+                            logger.info("No checkpoints found, starting training from scratch")
+                    
+                    if checkpoint_path:
+                        # Load the checkpoint
+                        from utils.training_utils import load_checkpoint
+                        start_epoch, loaded_history, loaded_config = load_checkpoint(
+                            model, optimizer, scheduler, checkpoint_path
+                        )
+                        
+                        if start_epoch > 0 and loaded_history:
+                            logger.info(f"Resuming training from epoch {start_epoch}")
+                            # Update config with any missing values from loaded config
+                            if loaded_config:
+                                for k, v in loaded_config.items():
+                                    if k not in config:
+                                        config[k] = v
+                        else:
+                            logger.warning("Failed to load checkpoint, starting from scratch")
+                            start_epoch = 0
+
                 # Track training start time for performance metrics
                 train_start_time = time.time()
 
@@ -202,6 +249,9 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                     config,
                     device,
                     validation_split=validation_split,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    start_epoch=start_epoch
                 )
 
                 # Calculate and log training time

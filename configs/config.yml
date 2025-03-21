@@ -35,20 +35,31 @@ hyperparameters:
   test_samples: 10000
   noise_level: 0.15
   sparsity_factor: 0.5
-  epochs: 10
-  lr: 0.0001              # Original learning rate for FAN
+  epochs: 300             # Increased epochs for longer training
+  lr: 0.00005             # Lower initial learning rate for more stable training 
+  min_lr: 1e-7            # Minimum learning rate to prevent tiny gradient issues
   weight_decay: 0.00001   # L2 regularization for better generalization (as float)
   batch_size: 256         # Larger batch size for better hardware utilization
   num_workers: 4          # Use multiple CPU workers for data loading
-  use_amp: false          # Automatic mixed precision (will auto-enable for CUDA)
+  use_amp: true           # Automatic mixed precision (better for Tesla V100)
   optimizer: "adamw"      # Use AdamW optimizer for better performance
   use_scheduler: true     # Enable learning rate scheduling
   scheduler_type: "cosine" # Cosine annealing scheduler
   drop_last: true         # Drop last batch for more consistent batch sizes
   clip_value: 0.5         # Value for gradient clipping to prevent NaN issues
-  multigpu: true                # Enable multi-GPU training
-  gradient_accumulation_steps: 2   # Number of batches to accumulate gradients for stability
+  clip_gradients: true    # Always clip gradients to prevent explosions
+  multigpu: true          # Enable multi-GPU training
+  gradient_accumulation_steps: 4   # Increased gradient accumulation for stability
   distributed_training: auto       # 'auto' (detect), true, false (use DataParallel)
+  
+  # NaN loss prevention settings
+  nan_detection: true              # Enable advanced NaN detection and handling
+  scheduler_patience: 10           # Increased patience for more stable LR reduction
+  scheduler_factor: 0.5            # Less aggressive LR reduction factor
+  
+  # Checkpoint and resuming options
+  resume_training: true            # Enable to automatically resume from latest checkpoint
+  checkpoint_frequency: 25         # Save checkpoint every N epochs
   
   # AWS p3dn.24xlarge specific configuration
   aws_p3dn_optimization: true     # Automatically optimize for AWS p3dn.24xlarge with 8x Tesla V100

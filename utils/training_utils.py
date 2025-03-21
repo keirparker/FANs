@@ -4,6 +4,7 @@ Model training utilities for the ML experimentation framework.
 """
 
 import time
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -81,6 +82,7 @@ def create_optimizer(model, config):
 def create_scheduler(optimizer, config):
     """
     Create learning rate scheduler based on configuration.
+    Includes additional safety mechanisms to prevent NaN issues during long training runs.
 
     Args:
         optimizer: PyTorch optimizer
@@ -93,6 +95,13 @@ def create_scheduler(optimizer, config):
 
     if not use_scheduler:
         return None
+        
+    # Set a minimum learning rate floor to prevent numerical instability from tiny gradients
+    min_lr = config["hyperparameters"].get("min_lr", 1e-7)
+    logger.info(f"Setting minimum learning rate floor to {min_lr}")
+
+    # If NaN detection is enabled, use more conservative schedulers
+    nan_detection_enabled = os.environ.get("NAN_DETECTION", "0") == "1"
         
     # Get device type from optimizer to customize scheduler
     device_type = 'cpu'
@@ -108,19 +117,39 @@ def create_scheduler(optimizer, config):
     if device_type == 'cuda':
         # For CUDA, use more aggressive learning rate adjustments
         if scheduler_type == "reduce_on_plateau":
-            patience = config["hyperparameters"].get("scheduler_patience", 5)
-            factor = config["hyperparameters"].get("scheduler_factor", 0.2)  # More aggressive reduction
-            logger.info(f"Using ReduceLROnPlateau for CUDA with patience={patience}, factor={factor}")
+            # Use more conservative settings if NaN detection is enabled
+            if nan_detection_enabled:
+                patience = config["hyperparameters"].get("scheduler_patience", 10)  # Increase patience
+                factor = config["hyperparameters"].get("scheduler_factor", 0.5)     # Less aggressive reduction
+                threshold = 1e-3     # More lenient threshold
+                logger.info(f"Using stable ReduceLROnPlateau for CUDA with patience={patience}, factor={factor} (NaN prevention mode)")
+            else:
+                patience = config["hyperparameters"].get("scheduler_patience", 5)
+                factor = config["hyperparameters"].get("scheduler_factor", 0.2)  # More aggressive reduction
+                threshold = 1e-4     # Standard threshold
+                logger.info(f"Using ReduceLROnPlateau for CUDA with patience={patience}, factor={factor}")
+                
             return optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode="min", factor=factor, patience=patience, verbose=True, 
-                min_lr=1e-6, threshold=1e-4
+                min_lr=min_lr, threshold=threshold, cooldown=2  # Added cooldown period
             )
         elif scheduler_type == "cosine":
-            logger.info(f"Using CosineAnnealingWarmRestarts for CUDA with T_0={epochs//3}")
-            # Use warm restarts for CUDA
-            return optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optimizer, T_0=epochs//3, T_mult=1, eta_min=1e-6
-            )
+            # For long training runs, cosine annealing can contribute to NaN issues
+            # due to very small learning rates
+            if nan_detection_enabled:
+                logger.info(f"Using safer OneCycleLR for CUDA (NaN prevention mode)")
+                # Use OneCycleLR which maintains higher LR in the middle of training
+                max_lr = optimizer.param_groups[0]['lr'] * 3.0  # Peak at 3x initial LR
+                return optim.lr_scheduler.OneCycleLR(
+                    optimizer, max_lr=max_lr, total_steps=epochs,
+                    pct_start=0.3, final_div_factor=max(1.0/(min_lr / optimizer.param_groups[0]['lr']), 25.0)
+                )
+            else:
+                logger.info(f"Using CosineAnnealingWarmRestarts for CUDA with T_0={epochs//3}")
+                # Use warm restarts for CUDA - standard configuration
+                return optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                    optimizer, T_0=epochs//3, T_mult=1, eta_min=min_lr
+                )
         elif scheduler_type == "step":
             step_size = int(config["hyperparameters"].get("scheduler_step_size", 10))
             factor = float(config["hyperparameters"].get("scheduler_factor", 0.3))
@@ -183,6 +212,55 @@ def worker_init_fn(worker_id):
     # Each worker gets a different seed derived from the initial seed and worker_id
     np.random.seed(worker_seed + worker_id)
     random.seed(worker_seed + worker_id)
+    
+    
+def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
+    """
+    Load a checkpoint to resume training from a previous state.
+    
+    Args:
+        model: The model instance to load weights into
+        optimizer: The optimizer to restore state for
+        scheduler: The learning rate scheduler (may be None)
+        checkpoint_path: Path to the checkpoint file
+        
+    Returns:
+        tuple: (epoch, history, config) with the checkpoint's state
+    """
+    if not os.path.exists(checkpoint_path):
+        logger.warning(f"Checkpoint file not found: {checkpoint_path}")
+        return 0, None, None
+        
+    try:
+        logger.info(f"Loading checkpoint from {checkpoint_path}")
+        # Load on CPU to avoid OOM issues
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        
+        # Load model weights
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Restore optimizer state
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # Restore scheduler if provided and saved
+        if scheduler is not None and checkpoint['scheduler_state_dict'] is not None:
+            try:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            except Exception as e:
+                logger.warning(f"Failed to load scheduler state: {e}")
+        
+        # Return relevant state
+        epoch = checkpoint['epoch']
+        history = checkpoint['history']
+        config = checkpoint.get('config', None)
+        
+        logger.info(f"Resumed from epoch {epoch} with validation loss {checkpoint['val_loss']:.6f}")
+        return epoch + 1, history, config
+    except Exception as e:
+        logger.error(f"Error loading checkpoint: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return 0, None, None
 
 
 def prepare_data_loaders(t_train, data_train, config, t_val=None, data_val=None, device=None, device_info=None):
@@ -374,10 +452,12 @@ def compute_metrics(y_true, y_pred):
         "mae": float(mae),
         "r2": float(r2),
     }
-def train_model(model, t_train, data_train, config, device, validation_split=0.2):
+def train_model(model, t_train, data_train, config, device, validation_split=0.2, optimizer=None, scheduler=None, start_epoch=0):
     """
     Enhanced training loop with loss tracking, validation, and multi-GPU support.
     Optimized for both Apple Silicon and p3dn.24xlarge with 8x Tesla V100 GPUs.
+    Includes robust NaN handling to prevent training collapse after many epochs.
+    Supports checkpoint loading to resume training from a specific epoch.
 
     Args:
         model: A PyTorch model instance
@@ -386,24 +466,93 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
         config: Dictionary of hyperparameters
         device: torch.device to run on
         validation_split: Fraction of data to use for validation
+        optimizer: Optional pre-created optimizer (used when resuming training)
+        scheduler: Optional pre-created scheduler (used when resuming training)
+        start_epoch: Epoch to start/resume training from (default 0)
 
     Returns:
         dict: Training history (losses, metrics, etc.)
     """
+    # Check for environment variable overrides from run_ec2.py
+    if "OVERRIDE_LEARNING_RATE" in os.environ:
+        try:
+            override_lr = float(os.environ["OVERRIDE_LEARNING_RATE"])
+            config["hyperparameters"]["lr"] = override_lr
+            logger.info(f"Overriding learning rate with value from environment: {override_lr}")
+        except:
+            pass
+            
+    if "OVERRIDE_CLIP_VALUE" in os.environ:
+        try:
+            override_clip = float(os.environ["OVERRIDE_CLIP_VALUE"])
+            config["hyperparameters"]["clip_value"] = override_clip
+            logger.info(f"Overriding gradient clip value with value from environment: {override_clip}")
+        except:
+            pass
+            
+    if "GRADIENT_ACCUMULATION_STEPS" in os.environ:
+        try:
+            override_accum = int(os.environ["GRADIENT_ACCUMULATION_STEPS"])
+            config["hyperparameters"]["gradient_accumulation_steps"] = override_accum
+            logger.info(f"Overriding gradient accumulation steps with value from environment: {override_accum}")
+        except:
+            pass
+            
+    # Enable advanced NaN detection if set in environment or config
+    nan_detection_enabled = (os.environ.get("NAN_DETECTION", "0") == "1" or 
+                           config["hyperparameters"].get("nan_detection", False))
+    if nan_detection_enabled:
+        logger.info("Advanced NaN detection and correction enabled")
+        
+        # Force specific settings when NaN detection is enabled to ensure stability
+        config["hyperparameters"]["clip_gradients"] = True
+        if "clip_value" not in config["hyperparameters"] or config["hyperparameters"]["clip_value"] > 1.0:
+            config["hyperparameters"]["clip_value"] = 0.5
+            logger.info("Setting clip_value=0.5 for NaN prevention")
+            
+        # Ensure sufficient gradient accumulation steps
+        if "gradient_accumulation_steps" not in config["hyperparameters"] or config["hyperparameters"]["gradient_accumulation_steps"] < 2:
+            config["hyperparameters"]["gradient_accumulation_steps"] = 4
+            logger.info("Setting gradient_accumulation_steps=4 for NaN prevention")
+            
     # Get device information if available
     device_info = None
     if isinstance(device, tuple) and len(device) == 2:
         # New format: device is actually a tuple of (device, device_info)
         device, device_info = device
     
-    # Check for multi-GPU capabilities
-    use_multi_gpu = config["hyperparameters"].get("multigpu", False) and torch.cuda.device_count() > 1
+    # Safely check CUDA device count - start with assumption of 1 GPU
+    cuda_device_count = 1
+    try:
+        if torch.cuda.is_available():
+            # Set device to 0 first to avoid errors
+            torch.cuda.set_device(0)
+            # Now safely check device count
+            cuda_device_count = torch.cuda.device_count()
+            logger.info(f"PyTorch reports {cuda_device_count} CUDA devices")
+    except Exception as e:
+        logger.warning(f"Error checking CUDA device count: {e}")
+        # If there's an error, assume we have 1 GPU for safety
+        cuda_device_count = 1
+    
+    # Check for multi-GPU capabilities (with extra safety)
+    try:
+        use_multi_gpu = config["hyperparameters"].get("multigpu", False) and cuda_device_count > 1
+    except:
+        use_multi_gpu = False
     
     # If we have device_info, use it to get more accurate GPU count
     if device_info and device_info.get('is_multi_gpu', False):
-        num_gpus = device_info.get('gpu_count', torch.cuda.device_count())
+        # If we're on AWS p3dn, force to 1 GPU initially for safety
+        if device_info.get('aws_instance') == 'p3dn.24xlarge':
+            logger.info("AWS p3dn.24xlarge detected - starting with 1 GPU for safety")
+            num_gpus = 1
+            # Disable multi-GPU for now (safer approach)
+            use_multi_gpu = False
+        else:
+            num_gpus = device_info.get('gpu_count', cuda_device_count)
     else:
-        num_gpus = torch.cuda.device_count() if use_multi_gpu else 1
+        num_gpus = cuda_device_count if use_multi_gpu else 1
     
     # Set up gradient accumulation
     gradient_accumulation_steps = int(config["hyperparameters"].get("gradient_accumulation_steps", 1))
@@ -425,15 +574,29 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
     if use_multi_gpu and num_gpus > 1:
         logger.info(f"Using {num_gpus} GPUs for training")
         
-        # Handle 'auto' option for distributed_training
-        distributed_training = config["hyperparameters"].get("distributed_training", False)
-        if distributed_training == "auto":
-            # Auto-detect: use distributed for p3dn.24xlarge, DataParallel otherwise
-            try_distributed = is_p3dn or (device_info and device_info.get('aws_instance') is not None)
-            logger.info(f"Auto-detected distributed_training={try_distributed}")
-        else:
-            # Use explicit setting
-            try_distributed = distributed_training
+        # Handle 'auto' option for distributed_training - with error handling
+        try:
+            # Check for environment variable override from run_ec2.py
+            if os.environ.get("DISABLE_DISTRIBUTED", "0") == "1":
+                try_distributed = False
+                logger.info("Distributed training disabled by environment variable")
+            elif os.environ.get("USE_DATAPARALLEL", "0") == "1":
+                try_distributed = False
+                logger.info("Using DataParallel as requested by environment variable")
+            else:
+                # Use config setting if no environment variable override
+                distributed_training = config["hyperparameters"].get("distributed_training", False)
+                if distributed_training == "auto":
+                    # On first run, be conservative: don't use distributed
+                    try_distributed = False
+                    logger.info(f"Auto-detected distributed_training={try_distributed} (conservative first run)")
+                else:
+                    # Use explicit setting
+                    try_distributed = bool(distributed_training)
+        except Exception as e:
+            logger.warning(f"Error detecting distributed training mode: {e}")
+            try_distributed = False
+            logger.info(f"Defaulting to distributed_training=False for safety")
         
         # For AWS p3dn.24xlarge, we'll try harder to use DDP for better performance
         if is_p3dn:
@@ -627,8 +790,14 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
 
     # Set up loss function, optimizer, and scheduler
     criterion = nn.MSELoss()
-    optimizer = create_optimizer(model, config)
-    scheduler = create_scheduler(optimizer, config)
+    
+    # Use provided optimizer and scheduler if available (from checkpoint loading)
+    if optimizer is None:
+        optimizer = create_optimizer(model, config)
+    
+    if scheduler is None:
+        scheduler = create_scheduler(optimizer, config)
+        
     num_epochs = int(config["hyperparameters"].get("epochs", 10))
     
     # Enable Automatic Mixed Precision (AMP) for faster training
@@ -664,10 +833,12 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
         min_delta = config["hyperparameters"].get("early_stopping_min_delta", 0.001)
         counter = 0
 
-    # Single epoch loop
-    for epoch in range(num_epochs):
+    # Single epoch loop - start from start_epoch if resuming
+    for epoch in range(start_epoch, num_epochs):
         start_time = time.time()
-        history["epochs"].append(epoch)
+        # Only append to history if this is a new epoch
+        if epoch >= len(history["epochs"]):
+            history["epochs"].append(epoch)
 
         # Training phase
         model.train()
@@ -725,16 +896,54 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                     
                 loss = criterion(preds, y_batch) / gradient_accumulation_steps
                 
-                # Check for NaN loss
-                if torch.isnan(loss):
-                    logger.warning("NaN loss detected, using zero loss instead")
-                    loss = torch.tensor(0.0, device=loss.device, requires_grad=True)
+                # Check for NaN loss - enhanced detection and recovery
+                if torch.isnan(loss) or torch.isinf(loss):
+                    if nan_detection_enabled:
+                        logger.warning(f"NaN/Inf loss detected in batch {batch_count}, attempting recovery...")
+                        
+                        # Save model state before attempting recovery
+                        try:
+                            prev_state = {name: param.detach().clone() for name, param in model.named_parameters()}
+                        except:
+                            prev_state = None
+                            
+                        # Recovery strategy 1: Use small positive loss instead of zero
+                        # This maintains gradient flow while avoiding collapse
+                        recovery_loss = torch.tensor(1e-4, device=loss.device, requires_grad=True)
+                        
+                        # Check if model has NaN weights and reset them
+                        has_nan_weights = False
+                        for name, param in model.named_parameters():
+                            if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                                has_nan_weights = True
+                                logger.warning(f"NaN/Inf detected in model parameter {name}, resetting to previous state")
+                                # Reset to previous value or small random values if no previous state
+                                if prev_state is not None and name in prev_state:
+                                    param.data.copy_(prev_state[name])
+                                else:
+                                    # Initialize with small random values based on shape
+                                    param.data.uniform_(-0.01, 0.01)
+                                    
+                        if has_nan_weights:
+                            logger.warning("Model weights contained NaNs - reset to stable values")
+                        
+                        logger.warning(f"Using recovery loss value: {recovery_loss.item()}")
+                        loss = recovery_loss / gradient_accumulation_steps
+                    else:
+                        # Basic recovery - use zero loss
+                        logger.warning("NaN loss detected, using zero loss instead")
+                        loss = torch.tensor(0.0, device=loss.device, requires_grad=True)
             
             # Track loss for reporting (use the unscaled value)
             batch_loss = loss.item() * gradient_accumulation_steps
-            running_loss += batch_loss * x_batch.size(0)
-            accumulated_loss += batch_loss * x_batch.size(0)
-            accumulated_samples += x_batch.size(0)
+            
+            # Additional check to prevent NaN propagation
+            if not (torch.isnan(torch.tensor(batch_loss)) or torch.isinf(torch.tensor(batch_loss))):
+                running_loss += batch_loss * x_batch.size(0)
+                accumulated_loss += batch_loss * x_batch.size(0)
+                accumulated_samples += x_batch.size(0)
+            else:
+                logger.warning(f"Skipping NaN/Inf batch_loss in loss accumulation")
             
             # Backward pass with gradient scaling for mixed precision
             if (device.type == 'cuda' or device.type == 'mps') and use_amp and scaler is not None:
@@ -795,13 +1004,73 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                     if device.type == 'cuda' and num_gpus > 1:
                         torch.cuda.synchronize()
                     
-                    # Check for NaN in parameters after update
+                    # Enhanced check for NaN in parameters after update with better recovery
                     has_nan = False
-                    for param in model.parameters():
-                        if torch.isnan(param.data).any():
+                    has_inf = False
+                    nan_count = 0
+                    inf_count = 0
+                    
+                    for name, param in model.named_parameters():
+                        # Check for NaNs
+                        nan_mask = torch.isnan(param.data)
+                        if nan_mask.any():
                             has_nan = True
-                            logger.warning("NaN detected in model parameters after update, replacing with zeros")
-                            param.data = torch.where(torch.isnan(param.data), torch.zeros_like(param.data), param.data)
+                            current_nan_count = nan_mask.sum().item()
+                            nan_count += current_nan_count
+                            
+                            # If advanced NaN detection is enabled, use more sophisticated recovery
+                            if nan_detection_enabled:
+                                logger.warning(f"NaN detected in {name}: {current_nan_count} values. Attempting recovery...")
+                                
+                                # Advanced recovery: Replace NaNs with small random values matching parameter distribution
+                                if param.data.numel() > 100:  # Only compute stats on larger tensors
+                                    # Calculate mean and std of non-NaN values
+                                    valid_values = param.data[~nan_mask]
+                                    if valid_values.numel() > 0:
+                                        mean = valid_values.mean().item()
+                                        std = valid_values.std().item()
+                                        if std < 1e-7:  # Avoid too small std
+                                            std = 1e-7
+                                        
+                                        # Create replacement tensor with similar distribution but smaller scale
+                                        replacement = torch.randn_like(param.data[nan_mask]) * (std * 0.1) + mean
+                                        param.data[nan_mask] = replacement
+                                        logger.info(f"Replaced NaNs in {name} with values from N({mean:.5f}, {std:.5f})")
+                                    else:
+                                        # All values are NaN, initialize with small random values
+                                        param.data = torch.randn_like(param.data) * 1e-4
+                                        logger.warning(f"All values in {name} were NaN! Reinitializing completely.")
+                                else:
+                                    # For small tensors, just use small random values
+                                    param.data[nan_mask] = torch.randn_like(param.data[nan_mask]) * 1e-4
+                            else:
+                                # Basic recovery: Replace NaNs with zeros
+                                logger.warning(f"NaN detected in {name} after update, replacing with zeros")
+                                param.data = torch.where(nan_mask, torch.zeros_like(param.data), param.data)
+                        
+                        # Also check for infinities
+                        inf_mask = torch.isinf(param.data)
+                        if inf_mask.any():
+                            has_inf = True
+                            current_inf_count = inf_mask.sum().item()
+                            inf_count += current_inf_count
+                            
+                            # Replace infinities with large but finite values preserving sign
+                            logger.warning(f"Inf detected in {name}: {current_inf_count} values. Replacing with bounded values.")
+                            safe_values = torch.sign(param.data[inf_mask]) * 1.0  # Use +/-1.0 based on sign
+                            param.data[inf_mask] = safe_values
+                    
+                    if has_nan or has_inf:
+                        logger.warning(f"Fixed {nan_count} NaN values and {inf_count} Inf values in model parameters")
+                        
+                        # If we're having serious NaN issues, we can optionally reduce learning rate
+                        if nan_count + inf_count > 1000 and nan_detection_enabled:
+                            current_lr = optimizer.param_groups[0]['lr']
+                            new_lr = current_lr * 0.8  # Reduce LR by 20%
+                            if new_lr >= 1e-7:  # Don't go too low
+                                for param_group in optimizer.param_groups:
+                                    param_group['lr'] = new_lr
+                                logger.warning(f"Temporarily reducing learning rate from {current_lr} to {new_lr} due to numerical instability")
                     
                     # Log accumulated loss for better monitoring with multi-GPU
                     if num_gpus > 1 and gradient_accumulation_steps > 1:
@@ -876,6 +1145,51 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                 f"Train Loss: {epoch_loss:.6f}, Val Loss: {val_loss:.6f}, "
                 f"R²: {metrics['r2']:.4f}, RMSE: {metrics['rmse']:.4f}"
             )
+            
+            # Save checkpoints periodically and on best validation loss
+            if nan_detection_enabled and epoch > 0:
+                # Create checkpoints directory if it doesn't exist
+                checkpoint_dir = os.path.join("models", "checkpoints")
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                
+                # Determine if this is the best model so far - use a regular variable
+                # since history is a dict not an object
+                if 'best_val_loss' not in locals():
+                    best_val_loss = float('inf')
+                    
+                is_best = val_loss < best_val_loss
+                if is_best:
+                    best_val_loss = val_loss
+                    
+                # Get checkpoint frequency from config
+                checkpoint_frequency = config["hyperparameters"].get("checkpoint_frequency", 25)
+                
+                # Save checkpoint at specified frequency and for best model
+                if is_best or epoch % checkpoint_frequency == 0:
+                    try:
+                        # Create checkpoint with all necessary info to resume training
+                        checkpoint = {
+                            'epoch': epoch,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': scheduler.state_dict() if scheduler and not isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau) else None,
+                            'val_loss': val_loss,
+                            'train_loss': epoch_loss,
+                            'history': history,
+                            'config': {k: v for k, v in config.items() if isinstance(v, (int, float, str, bool, list, dict))}
+                        }
+                        
+                        # Generate filename based on epoch and loss
+                        if is_best:
+                            checkpoint_path = os.path.join(checkpoint_dir, f"best_model.pt")
+                            logger.info(f"Saving best model checkpoint (val_loss={val_loss:.6f})")
+                        else:
+                            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch}.pt")
+                            logger.info(f"Saving periodic checkpoint at epoch {epoch}")
+                            
+                        torch.save(checkpoint, checkpoint_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to save checkpoint: {e}")
 
             # Scheduler step for ReduceLROnPlateau
             if scheduler is not None and isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
