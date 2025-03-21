@@ -154,32 +154,96 @@ def detect_gpu_capabilities():
     
     # Gather CUDA device information if available
     if gpu_info['cuda_available']:
-        gpu_info['cuda_device_count'] = torch.cuda.device_count()
-        
-        # Collect info about each CUDA device
-        for i in range(gpu_info['cuda_device_count']):
-            try:
-                device_name = torch.cuda.get_device_name(i)
-                device_cap = torch.cuda.get_device_capability(i)
-                device_props = {
-                    'index': i,
-                    'name': device_name,
-                    'compute_capability': f"{device_cap[0]}.{device_cap[1]}",
-                }
-                
-                # Try to get memory info
+        try:
+            gpu_info['cuda_device_count'] = torch.cuda.device_count()
+            
+            # For AWS p3dn.24xlarge, we might need to check nvidia-smi directly
+            if gpu_info['cuda_device_count'] == 0 or gpu_info['cuda_device_count'] == 1:
                 try:
-                    free_mem, total_mem = torch.cuda.mem_get_info(i)
-                    device_props['total_memory'] = total_mem
-                    device_props['free_memory'] = free_mem
-                    gpu_info['total_gpu_memory'] += total_mem
-                except:
-                    # Older PyTorch versions or restricted environments
-                    pass
+                    # Try to get device count from nvidia-smi
+                    import subprocess
+                    nvidia_smi = subprocess.check_output(['nvidia-smi', '-L'], stderr=subprocess.DEVNULL).decode('utf-8')
+                    gpu_lines = nvidia_smi.strip().split('\n')
+                    
+                    # If we found multiple GPUs but PyTorch only sees 1, update the count
+                    if len(gpu_lines) > gpu_info['cuda_device_count']:
+                        logger.warning(f"PyTorch only detected {gpu_info['cuda_device_count']} GPUs but nvidia-smi shows {len(gpu_lines)}")
+                        gpu_info['cuda_device_count'] = len(gpu_lines)
+                        
+                        # For p3dn.24xlarge, always set to 8 if we detect Tesla V100s
+                        if any('Tesla V100' in line for line in gpu_lines) and len(gpu_lines) >= 4:
+                            logger.info("Detected Tesla V100 GPUs, most likely on p3dn.24xlarge with 8 GPUs")
+                            gpu_info['cuda_device_count'] = 8
+                except Exception as e:
+                    logger.warning(f"Failed to get GPU count from nvidia-smi: {e}")
+            
+            # On p3dn.24xlarge, add all 8 GPUs with minimal info to avoid errors
+            if gpu_info['is_aws'] and gpu_info['aws_instance_type'] == 'p3dn.24xlarge':
+                logger.info("Creating device info for all 8 GPUs on p3dn.24xlarge")
+                for i in range(8):
+                    device_props = {
+                        'index': i,
+                        'name': "Tesla V100-SXM2-32GB",
+                        'compute_capability': "7.0",
+                        'total_memory': 32 * 1024 * 1024 * 1024,  # 32GB in bytes
+                    }
+                    gpu_info['cuda_devices'].append(device_props)
+                    gpu_info['total_gpu_memory'] += device_props['total_memory']
                 
-                gpu_info['cuda_devices'].append(device_props)
-            except Exception as e:
-                logger.warning(f"Error getting info for CUDA device {i}: {e}")
+                # Skip detailed per-GPU detection which might fail
+                return gpu_info
+            
+            # For all other cases, collect info about each CUDA device (safer approach)
+            current_device = torch.cuda.current_device()
+            for i in range(gpu_info['cuda_device_count']):
+                try:
+                    # Temporarily set device to avoid errors
+                    torch.cuda.set_device(i)
+                    device_name = torch.cuda.get_device_name(i)
+                    
+                    # Only get capabilities for current device to avoid errors
+                    if i == current_device:
+                        try:
+                            device_cap = torch.cuda.get_device_capability(i)
+                            compute_capability = f"{device_cap[0]}.{device_cap[1]}"
+                        except:
+                            compute_capability = "unknown"
+                    else:
+                        compute_capability = "unknown"
+                        
+                    device_props = {
+                        'index': i,
+                        'name': device_name,
+                        'compute_capability': compute_capability,
+                    }
+                    
+                    # Try to get memory info only for current device
+                    if i == current_device:
+                        try:
+                            free_mem, total_mem = torch.cuda.mem_get_info(i)
+                            device_props['total_memory'] = total_mem
+                            device_props['free_memory'] = free_mem
+                            gpu_info['total_gpu_memory'] += total_mem
+                        except:
+                            # Older PyTorch versions or restricted environments
+                            pass
+                    
+                    gpu_info['cuda_devices'].append(device_props)
+                except Exception as e:
+                    # If we can't get details for a specific GPU, add it with minimal info
+                    logger.warning(f"Error getting detailed info for CUDA device {i}: {e}")
+                    device_props = {
+                        'index': i,
+                        'name': f"GPU {i}",
+                        'compute_capability': "unknown",
+                    }
+                    gpu_info['cuda_devices'].append(device_props)
+                
+            # Reset to original device
+            torch.cuda.set_device(current_device)
+            
+        except Exception as e:
+            logger.warning(f"Error gathering CUDA device information: {e}")
     
     return gpu_info
 
@@ -281,9 +345,21 @@ def select_device(config):
         logger.info("Optimizing for AWS p3dn.24xlarge instance")
         setup_aws_p3dn_environment()
         
+        # Check if p3dn optimization is explicitly enabled in config
+        aws_p3dn_optimization = config.get("hyperparameters", {}).get("aws_p3dn_optimization", True)
+        
+        # Get max GPUs to use if specified
+        aws_max_gpus = config.get("hyperparameters", {}).get("aws_max_gpus", 8)
+        if aws_max_gpus < 8:
+            # Limit visible GPUs if user requested fewer
+            import os
+            visible_devices = ",".join(str(i) for i in range(aws_max_gpus))
+            os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
+            logger.info(f"Limiting to {aws_max_gpus} GPUs as specified in config: CUDA_VISIBLE_DEVICES={visible_devices}")
+        
         # If we're on this specific instance type, always use CUDA
         device_str = "cuda"
-        force_cuda = True
+        force_cuda = aws_p3dn_optimization  # Only force if optimization is enabled
         
     elif gpu_info['apple_silicon']:
         # Configure for Apple Silicon

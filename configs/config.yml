@@ -46,9 +46,13 @@ hyperparameters:
   scheduler_type: "cosine" # Cosine annealing scheduler
   drop_last: true         # Drop last batch for more consistent batch sizes
   clip_value: 0.5         # Value for gradient clipping to prevent NaN issues
-  multigpu: true         # Enable multi-GPU training for p3dn.24xlarge
-  gradient_accumulation_steps: 2  # Number of batches to accumulate gradients
-  distributed_training: true  # Enable distributed training
+  multigpu: true                # Enable multi-GPU training
+  gradient_accumulation_steps: 2   # Number of batches to accumulate gradients for stability
+  distributed_training: auto       # 'auto' (detect), true, false (use DataParallel)
+  
+  # AWS p3dn.24xlarge specific configuration
+  aws_p3dn_optimization: true     # Automatically optimize for AWS p3dn.24xlarge with 8x Tesla V100
+  aws_max_gpus: 8                 # Maximum number of GPUs to use on AWS
 
 logging:
   level: "INFO"  # Could be DEBUG, INFO, WARNING, ERROR, etc.

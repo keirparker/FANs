@@ -419,48 +419,131 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
         use_multi_gpu = True
         num_gpus = 8
     
+    # Record if we're using DDP for specific optimizations later
+    using_ddp = False
+    
     if use_multi_gpu and num_gpus > 1:
         logger.info(f"Using {num_gpus} GPUs for training")
-        # Wrap model with DistributedDataParallel or DataParallel depending on setup
-        if config["hyperparameters"].get("distributed_training", False):
+        
+        # Handle 'auto' option for distributed_training
+        distributed_training = config["hyperparameters"].get("distributed_training", False)
+        if distributed_training == "auto":
+            # Auto-detect: use distributed for p3dn.24xlarge, DataParallel otherwise
+            try_distributed = is_p3dn or (device_info and device_info.get('aws_instance') is not None)
+            logger.info(f"Auto-detected distributed_training={try_distributed}")
+        else:
+            # Use explicit setting
+            try_distributed = distributed_training
+        
+        # For AWS p3dn.24xlarge, we'll try harder to use DDP for better performance
+        if is_p3dn:
+            logger.info("AWS p3dn.24xlarge detected - optimizing for 8x Tesla V100 GPUs")
+            try_distributed = True
+        
+        # First try DistributedDataParallel for better performance
+        if try_distributed:
             try:
                 # Try to initialize distributed backend if not already done
                 if not torch.distributed.is_initialized():
                     # For AWS p3dn.24xlarge, use NCCL backend with specific settings
                     if is_p3dn:
-                        # Set environment variables specifically for NCCL on p3dn
                         import os
+                        # Set environment variables specifically for NCCL on p3dn
                         os.environ["NCCL_DEBUG"] = "INFO"
                         os.environ["NCCL_IB_DISABLE"] = "0"
                         os.environ["NCCL_IB_GID_INDEX"] = "3"
                         os.environ["NCCL_IB_TIMEOUT"] = "23"
                         os.environ["NCCL_SOCKET_IFNAME"] = "^lo,docker"
                         
-                        # Initialize process group with NCCL backend
-                        torch.distributed.init_process_group(backend="nccl", init_method="env://")
+                        # Initialize with file method which doesn't need env vars
+                        import tempfile
+                        temp_dir = tempfile.mkdtemp()
+                        file_path = os.path.join(temp_dir, "torch_distributed_init")
+                        init_method = f"file://{file_path}"
+                        
+                        # Single-node multi-GPU setup parameters
+                        world_size = num_gpus
+                        rank = 0  # Master process
+                        
+                        logger.info(f"Initializing distributed: world_size={world_size}, rank={rank}, init_method={init_method}")
+                        try:
+                            torch.distributed.init_process_group(
+                                backend="nccl",
+                                init_method=init_method,
+                                world_size=world_size,
+                                rank=rank
+                            )
+                            logger.info("Successfully initialized distributed process group with file:// method")
+                        except Exception as e1:
+                            logger.warning(f"File-based initialization failed: {e1}, trying TCP")
+                            
+                            # Try TCP method as fallback
+                            try:
+                                # Try with tcp init method on localhost
+                                init_method = "tcp://127.0.0.1:29500"
+                                logger.info(f"Trying TCP initialization: world_size={world_size}, rank={rank}")
+                                torch.distributed.init_process_group(
+                                    backend="nccl",
+                                    init_method=init_method,
+                                    world_size=world_size,
+                                    rank=rank
+                                )
+                                logger.info("Successfully initialized distributed process group with TCP method")
+                            except Exception as e2:
+                                logger.warning(f"TCP initialization failed: {e2}")
+                                logger.warning("All distributed initialization methods failed, falling back to DataParallel")
+                                raise RuntimeError("Could not initialize process group with any method")
                     else:
-                        # Generic initialization
-                        torch.distributed.init_process_group(backend="nccl")
-                    
-                    local_rank = torch.distributed.get_rank()
-                    torch.cuda.set_device(local_rank)
-                    logger.info(f"Initialized distributed process group, local rank: {local_rank}")
+                        # For non-p3dn instances, try a simpler approach
+                        try:
+                            # Use TCP method with localhost
+                            init_method = "tcp://127.0.0.1:29500"
+                            world_size = num_gpus
+                            rank = 0
+                            
+                            logger.info(f"Initializing distributed: world_size={world_size}, rank={rank}, init_method={init_method}")
+                            torch.distributed.init_process_group(
+                                backend="nccl",
+                                init_method=init_method,
+                                world_size=world_size,
+                                rank=rank
+                            )
+                            logger.info("Successfully initialized distributed process group")
+                        except Exception as e:
+                            logger.warning(f"Distributed initialization failed: {e}")
+                            raise RuntimeError(f"Could not initialize distributed process group: {e}")
+                
+                # If we get here, initialization succeeded
+                local_rank = torch.distributed.get_rank()
+                torch.cuda.set_device(local_rank)
+                logger.info(f"Setting CUDA device to local rank: {local_rank}")
                 
                 # Use DDP for most efficient multi-GPU training
                 from torch.nn.parallel import DistributedDataParallel as DDP
-                model = DDP(model, device_ids=[device.index] if device.type == 'cuda' else None)
+                model = DDP(model, device_ids=[local_rank])
                 logger.info("Using DistributedDataParallel for multi-GPU training")
+                using_ddp = True
+                
             except (ImportError, RuntimeError) as e:
                 # Fall back to DataParallel if distributed fails
-                logger.warning(f"Failed to init distributed training: {e}, falling back to DataParallel")
+                logger.warning(f"Failed to initialize distributed training: {e}")
+                logger.warning("Falling back to DataParallel (less efficient but more compatible)")
+                try:
+                    from torch.nn.parallel import DataParallel
+                    model = DataParallel(model)
+                    logger.info("Using DataParallel for multi-GPU training")
+                except Exception as dp_error:
+                    logger.error(f"Failed to initialize DataParallel: {dp_error}")
+                    logger.warning("Will continue with single GPU training")
+        else:
+            # Use DataParallel for simpler multi-GPU training
+            try:
                 from torch.nn.parallel import DataParallel
                 model = DataParallel(model)
                 logger.info("Using DataParallel for multi-GPU training")
-        else:
-            # Use DataParallel for simpler multi-GPU training
-            from torch.nn.parallel import DataParallel
-            model = DataParallel(model)
-            logger.info("Using DataParallel for multi-GPU training")
+            except Exception as dp_error:
+                logger.error(f"Failed to initialize DataParallel: {dp_error}")
+                logger.warning("Will continue with single GPU training")
     # Get the random seed for reproducible validation split
     seed = config.get("random_seed", 42)
 
