@@ -1,155 +1,427 @@
 #!/usr/bin/env python
 """
 Device selection utilities for the ML experimentation framework.
+Provides comprehensive support for different hardware platforms:
+- Apple Silicon (M1/M2/M3) with MPS acceleration
+- NVIDIA GPUs with CUDA
+- AWS EC2 instances (specifically p3dn.24xlarge with 8x Tesla V100)
+- CPU fallback
 """
 
 import torch
+import os
+import platform
+import subprocess
+import re
 from loguru import logger
+
+
+def detect_aws_instance_type():
+    """
+    Detect if running on an AWS EC2 instance and identify the instance type.
+    
+    Returns:
+        str or None: AWS EC2 instance type if detected, None otherwise
+    """
+    instance_type = None
+    
+    # Try to get instance info from EC2 metadata service
+    try:
+        # Use a short timeout for the metadata service
+        import urllib.request
+        import socket
+        socket.setdefaulttimeout(1)
+        response = urllib.request.urlopen('http://169.254.169.254/latest/meta-data/instance-type')
+        instance_type = response.read().decode('utf-8')
+        logger.info(f"Detected AWS EC2 instance type: {instance_type}")
+        return instance_type
+    except:
+        # Try to get from system info
+        try:
+            # On Linux, check for AWS-specific info
+            if platform.system() == 'Linux':
+                # Check if DMI info contains Amazon
+                try:
+                    dmi = subprocess.check_output(['cat', '/sys/devices/virtual/dmi/id/sys_vendor']).decode('utf-8').strip()
+                    if 'Amazon' in dmi:
+                        # Try to get instance type from product name
+                        product = subprocess.check_output(['cat', '/sys/devices/virtual/dmi/id/product_name']).decode('utf-8').strip()
+                        if product:
+                            logger.info(f"Detected AWS EC2 instance from DMI: {product}")
+                            return product
+                except:
+                    pass
+                    
+                # Try to infer from GPU count and type
+                try:
+                    nvidia_smi = subprocess.check_output(['nvidia-smi', '-L']).decode('utf-8')
+                    gpus = nvidia_smi.strip().split('\n')
+                    
+                    # Count Tesla V100 GPUs
+                    v100_count = sum(1 for gpu in gpus if 'Tesla V100' in gpu)
+                    
+                    if v100_count == 8:
+                        logger.info("Detected 8x Tesla V100 GPUs, likely p3dn.24xlarge")
+                        return "p3dn.24xlarge"
+                    elif v100_count == 4:
+                        logger.info("Detected 4x Tesla V100 GPUs, likely p3.8xlarge")
+                        return "p3.8xlarge"
+                    elif v100_count > 0:
+                        logger.info(f"Detected {v100_count}x Tesla V100 GPUs, likely p3 family")
+                        return f"p3-{v100_count}gpu"
+                except:
+                    pass
+        except:
+            pass
+    
+    return None
+
+
+def detect_apple_silicon():
+    """
+    Detect if running on Apple Silicon (M1/M2/M3) hardware.
+    
+    Returns:
+        bool: True if running on Apple Silicon, False otherwise
+        str or None: Apple Silicon chip model if available (M1, M2, M3, etc)
+    """
+    is_apple_silicon = False
+    chip_model = None
+    
+    # Check if running on macOS
+    if platform.system() == 'Darwin':
+        # Check if MPS is available - reliable indicator for Apple Silicon
+        mps_available = torch.backends.mps.is_available()
+        
+        # Try to get more detailed chip info
+        try:
+            # Use sysctl to get chip info on macOS
+            chip_info = subprocess.check_output(['sysctl', '-n', 'machdep.cpu.brand_string']).decode('utf-8').strip()
+            
+            # Extract chip model from output
+            if 'Apple' in chip_info:
+                is_apple_silicon = True
+                
+                # Try to extract the specific M1/M2/M3 model
+                match = re.search(r'Apple\s+(M\d+)', chip_info)
+                if match:
+                    chip_model = match.group(1)
+                    logger.info(f"Detected Apple Silicon: {chip_model}")
+                else:
+                    logger.info(f"Detected Apple Silicon: {chip_info}")
+            elif mps_available:
+                # If we can't identify specific chip but MPS is available,
+                # it's definitely Apple Silicon
+                is_apple_silicon = True
+                logger.info("Detected Apple Silicon via MPS availability")
+        except:
+            # Fallback detection using MPS
+            is_apple_silicon = mps_available
+            if is_apple_silicon:
+                logger.info("Detected Apple Silicon via MPS availability")
+    
+    return is_apple_silicon, chip_model
+
+
+def detect_gpu_capabilities():
+    """
+    Detect and catalog available GPU capabilities.
+    
+    Returns:
+        dict: Dictionary containing GPU capabilities
+    """
+    gpu_info = {
+        'cuda_available': torch.cuda.is_available(),
+        'cuda_device_count': 0,
+        'cuda_devices': [],
+        'cuda_version': torch.version.cuda,
+        'mps_available': torch.backends.mps.is_available() and torch.backends.mps.is_built(),
+        'apple_silicon': False,
+        'chip_model': None,
+        'total_gpu_memory': 0,
+        'is_aws': False,
+        'aws_instance_type': None,
+    }
+    
+    # Check if we're on Apple Silicon
+    gpu_info['apple_silicon'], gpu_info['chip_model'] = detect_apple_silicon()
+    
+    # Check if we're on AWS
+    aws_instance = detect_aws_instance_type()
+    if aws_instance:
+        gpu_info['is_aws'] = True
+        gpu_info['aws_instance_type'] = aws_instance
+    
+    # Gather CUDA device information if available
+    if gpu_info['cuda_available']:
+        gpu_info['cuda_device_count'] = torch.cuda.device_count()
+        
+        # Collect info about each CUDA device
+        for i in range(gpu_info['cuda_device_count']):
+            try:
+                device_name = torch.cuda.get_device_name(i)
+                device_cap = torch.cuda.get_device_capability(i)
+                device_props = {
+                    'index': i,
+                    'name': device_name,
+                    'compute_capability': f"{device_cap[0]}.{device_cap[1]}",
+                }
+                
+                # Try to get memory info
+                try:
+                    free_mem, total_mem = torch.cuda.mem_get_info(i)
+                    device_props['total_memory'] = total_mem
+                    device_props['free_memory'] = free_mem
+                    gpu_info['total_gpu_memory'] += total_mem
+                except:
+                    # Older PyTorch versions or restricted environments
+                    pass
+                
+                gpu_info['cuda_devices'].append(device_props)
+            except Exception as e:
+                logger.warning(f"Error getting info for CUDA device {i}: {e}")
+    
+    return gpu_info
+
+
+def setup_aws_p3dn_environment():
+    """
+    Configure environment variables for optimal performance on AWS p3dn.24xlarge instances.
+    These settings are specifically tuned for instances with 8x Tesla V100 GPUs and EFA networking.
+    """
+    # NCCL configuration for high-speed networks
+    os.environ["NCCL_DEBUG"] = "INFO"  # Enable NCCL debug info
+    os.environ["NCCL_IB_DISABLE"] = "0"  # Enable InfiniBand for interconnect
+    os.environ["NCCL_IB_GID_INDEX"] = "3"  # Optimal for AWS Elastic Fabric Adapter (EFA)
+    os.environ["NCCL_IB_HCA"] = "^mlx5_0"  # Use Mellanox adapters
+    os.environ["NCCL_IB_TC"] = "106"  # Traffic class for IB
+    os.environ["NCCL_IB_TIMEOUT"] = "23"  # Longer timeout for stability
+    os.environ["NCCL_SOCKET_IFNAME"] = "^lo,docker"  # Skip loopback, docker interfaces
+    os.environ["NCCL_P2P_DISABLE"] = "0"  # Enable GPU P2P
+    os.environ["NCCL_P2P_LEVEL"] = "NVL"  # NVLink for P2P
+    
+    # CUDA optimizations
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # Match IDs with nvidia-smi
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(8))  # Up to 8 GPUs
+    os.environ["CUDA_CACHE_DISABLE"] = "0"  # Enable JIT cache
+    os.environ["CUDA_AUTO_BOOST"] = "0"  # Disable autoboost for consistent performance
+    
+    # PyTorch specific optimizations
+    os.environ["OMP_NUM_THREADS"] = "8"  # Limit OpenMP threads
+    os.environ["KMP_BLOCKTIME"] = "0"  # Don't let OpenMP worker threads sleep
+    os.environ["KMP_AFFINITY"] = "granularity=fine,compact,1,0"  # CPU affinity
+    
+    # Distributed training optimizations
+    os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"  # Debug info for distributed
+    os.environ["TORCH_CPP_LOG_LEVEL"] = "INFO"  # More verbose logging
+    
+    logger.info("Configured environment variables for AWS p3dn.24xlarge")
+
+
+def setup_apple_silicon_environment():
+    """
+    Configure environment variables for optimal performance on Apple Silicon (M1/M2/M3) hardware.
+    """
+    # MPS optimizations
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"  # Enable MPS fallback
+    
+    # PyTorch performance optimizations for Apple Silicon
+    os.environ["OMP_NUM_THREADS"] = str(os.cpu_count())  # Use all cores for OpenMP
+    os.environ["MKL_NUM_THREADS"] = str(os.cpu_count())  # Use all cores for MKL
+    
+    # Memory management optimizations
+    os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"  # Don't limit MPS memory
+    
+    logger.info("Configured environment variables for Apple Silicon")
 
 
 def select_device(config):
     """
-    Determine which device to use based on config and hardware availability.
+    Enhanced device selection with platform-specific optimizations. 
+    Automatically detects and configures for:
+    - AWS p3dn.24xlarge instances with 8x Tesla V100 GPUs
+    - Apple Silicon (M1/M2/M3) with MPS acceleration
+    - Any CUDA-compatible GPU
+    - CPU fallback
 
     Args:
         config: Configuration dictionary with hyperparameters
 
     Returns:
         torch.device: The selected device (cuda, mps, or cpu)
+        dict: Additional information about the device configuration
     """
-    # Attempt to read device preference from config
+    # Get device options from config or use auto-detection
     device_str = config["hyperparameters"].get("device", None)
-    
-    # Check for EC2 p3.8x override
     force_cuda = config.get("force_cuda", False)
     bypass_pytorch_cuda_check = config.get("bypass_pytorch_cuda_check", False)
     
-    # If we're bypassing the regular CUDA check on EC2
-    if bypass_pytorch_cuda_check and device_str == "cuda":
-        logger.info("Using low-level CUDA override for p3.8x EC2 instances")
+    # Detect available GPU capabilities
+    gpu_info = detect_gpu_capabilities()
+    
+    # Log detected capabilities
+    logger.info(f"Detected system capabilities:")
+    logger.info(f"  CUDA: {'Available' if gpu_info['cuda_available'] else 'Not available'}")
+    if gpu_info['cuda_available']:
+        logger.info(f"  CUDA version: {gpu_info['cuda_version']}")
+        logger.info(f"  CUDA devices: {gpu_info['cuda_device_count']}")
+        for device in gpu_info['cuda_devices']:
+            logger.info(f"    Device {device['index']}: {device['name']}")
+    
+    logger.info(f"  MPS: {'Available' if gpu_info['mps_available'] else 'Not available'}")
+    if gpu_info['apple_silicon']:
+        logger.info(f"  Apple Silicon: {gpu_info['chip_model'] or 'Yes'}")
+    
+    if gpu_info['is_aws']:
+        logger.info(f"  AWS EC2 instance: {gpu_info['aws_instance_type']}")
+    
+    # Platform-specific optimizations - set up environment for specific platforms
+    if gpu_info['is_aws'] and gpu_info['aws_instance_type'] == 'p3dn.24xlarge':
+        # Configure for AWS p3dn.24xlarge with 8x Tesla V100 GPUs
+        logger.info("Optimizing for AWS p3dn.24xlarge instance")
+        setup_aws_p3dn_environment()
         
-        # Monkey patch torch.cuda to force availability
-        def _is_available_override():
-            return True
-            
-        def _get_device_count_override():
-            return 1
-            
-        def _get_device_name_override(device):
-            return "Tesla V100"
-            
-        # Apply monkey patches only if we're really forcing CUDA
-        # This is last resort when nothing else works
-        if not torch.cuda.is_available():
-            logger.warning("MONKEY PATCHING torch.cuda - USE WITH CAUTION")
-            # Save original functions
-            original_is_available = torch.cuda.is_available
-            original_device_count = torch.cuda.device_count
-            original_get_device_name = torch.cuda.get_device_name
-            
-            # Apply patches
-            torch.cuda.is_available = _is_available_override
-            torch.cuda.device_count = _get_device_count_override
-            torch.cuda.get_device_name = _get_device_name_override
-            
-            # Now torch.cuda.is_available() should return True
-            logger.info(f"After patching: torch.cuda.is_available() = {torch.cuda.is_available()}")
+        # If we're on this specific instance type, always use CUDA
+        device_str = "cuda"
+        force_cuda = True
+        
+    elif gpu_info['apple_silicon']:
+        # Configure for Apple Silicon
+        logger.info(f"Optimizing for Apple Silicon: {gpu_info['chip_model'] or 'Unknown model'}")
+        setup_apple_silicon_environment()
+        
+        # Default to MPS for Apple Silicon if not explicitly specified
+        if not device_str:
+            device_str = "mps"
     
-    # Apply CUDA environment variables that might help detection
-    import os
-    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # Match IDs with nvidia-smi
-    if "CUDA_VISIBLE_DEVICES" not in os.environ:
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use first GPU by default
-    
-    # Debug CUDA detection issues
-    cuda_available = torch.cuda.is_available()
-    if cuda_available:
-        cuda_device_count = torch.cuda.device_count()
-        cuda_device_name = torch.cuda.get_device_name(0) if cuda_device_count > 0 else "unknown"
-        logger.info(f"CUDA is available. Found {cuda_device_count} device(s): {cuda_device_name}")
-    else:
-        logger.warning("CUDA not detected. Debugging information:")
+    # If force_cuda is enabled but we can't detect CUDA normally
+    if force_cuda and (not gpu_info['cuda_available'] or bypass_pytorch_cuda_check):
+        logger.info("Force CUDA requested, applying advanced detection methods")
+        
+        # Advanced EC2 p3 instance checks - look for hardware signs
+        # Try to get nvidia-smi output even if PyTorch doesn't see CUDA
         try:
-            import subprocess
-            # Try to get nvidia-smi output
-            try:
-                nvidia_smi = subprocess.check_output(['nvidia-smi'], stderr=subprocess.STDOUT).decode('utf-8')
-                logger.info(f"nvidia-smi output:\n{nvidia_smi}")
-            except (subprocess.SubprocessError, FileNotFoundError):
-                logger.warning("nvidia-smi command failed or not found")
-            
-            # Try lspci to detect NVIDIA hardware    
-            try:
-                lspci = subprocess.check_output(['lspci', '|', 'grep', 'NVIDIA'], shell=True).decode('utf-8')
-                logger.info(f"lspci NVIDIA devices:\n{lspci}")
-            except:
-                logger.warning("lspci command failed or no NVIDIA devices found")
+            nvidia_smi = subprocess.check_output(['nvidia-smi', '-L'], stderr=subprocess.DEVNULL).decode('utf-8')
+            if 'Tesla V100' in nvidia_smi:
+                logger.info(f"Detected Tesla V100 GPUs from nvidia-smi:\n{nvidia_smi.strip()}")
                 
-            # Check if PyTorch was built with CUDA
-            logger.info(f"PyTorch CUDA built: {torch.version.cuda is not None}")
-            if torch.version.cuda:
-                logger.info(f"PyTorch CUDA version: {torch.version.cuda}")
-                
-            # Report CUDA_HOME and library paths
-            cuda_home = os.environ.get("CUDA_HOME", "not set")
-            logger.info(f"CUDA_HOME: {cuda_home}")
-            logger.info(f"LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', 'not set')}")
+                # Monkey patch torch.cuda to force availability if needed
+                if bypass_pytorch_cuda_check:
+                    logger.warning("MONKEY PATCHING torch.cuda for Tesla V100 detection - USE WITH CAUTION")
+                    
+                    # Save original functions
+                    original_is_available = torch.cuda.is_available
+                    original_device_count = torch.cuda.device_count
+                    original_get_device_name = torch.cuda.get_device_name
+                    
+                    # Count V100 GPUs from nvidia-smi output
+                    gpu_count = len(nvidia_smi.strip().split('\n'))
+                    
+                    # Save original functions
+                    original_is_available = torch.cuda.is_available
+                    original_device_count = torch.cuda.device_count
+                    original_get_device_name = torch.cuda.get_device_name
+                    
+                    # Define override functions
+                    def _is_available_override():
+                        return True
+                        
+                    def _get_device_count_override():
+                        return gpu_count
+                        
+                    def _get_device_name_override(device):
+                        return "Tesla V100"
+                    
+                    # Apply patches
+                    torch.cuda.is_available = _is_available_override
+                    torch.cuda.device_count = _get_device_count_override
+                    torch.cuda.get_device_name = _get_device_name_override
+                    
+                    # Update our cuda status after patching
+                    gpu_info['cuda_available'] = True
+                    gpu_info['cuda_device_count'] = gpu_count
+                    
+                    logger.info(f"After patching: CUDA available: {torch.cuda.is_available()}")
+                    logger.info(f"After patching: CUDA device count: {torch.cuda.device_count()}")
+                    
+                    # Register cleanup function to restore original functions when the process exits
+                    import atexit
+                    def _restore_cuda_functions():
+                        logger.info("Restoring original CUDA functions")
+                        torch.cuda.is_available = original_is_available
+                        torch.cuda.device_count = original_device_count
+                        torch.cuda.get_device_name = original_get_device_name
+                    
+                    atexit.register(_restore_cuda_functions)
         except Exception as e:
-            logger.error(f"Error during CUDA debug: {e}")
-
-    # Force CUDA on p3.8x EC2 if specified in config
-    if (force_cuda or bypass_pytorch_cuda_check) and device_str == "cuda":
-        # Use environment variable to make PyTorch detect CUDA
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use first GPU
-        
-        # Log CUDA version from config if available
-        cuda_version = config.get("cuda_version", "12.4")  # Default to 12.4 as reported
-        logger.info(f"Forcing CUDA device on p3.8x EC2 instance with CUDA {cuda_version}")
-        
-        # Create a CUDA device - bypass normal checks
+            logger.warning(f"Advanced CUDA detection failed: {e}")
+    
+    # Final device selection with platform optimizations
+    device_info = {
+        'type': None,
+        'name': None,
+        'is_multi_gpu': False,
+        'gpu_count': 0,
+        'platform': platform.system(),
+        'platform_specific': gpu_info['apple_silicon'] or gpu_info['is_aws'],
+        'aws_instance': gpu_info['aws_instance_type'] if gpu_info['is_aws'] else None,
+        'apple_silicon': gpu_info['apple_silicon'],
+        'chip_model': gpu_info['chip_model'],
+    }
+    
+    # Final device selection logic with precedence order
+    if device_str == "cuda" and (gpu_info['cuda_available'] or force_cuda):
+        # CUDA path for NVIDIA GPUs
         device = torch.device("cuda")
-        logger.info("Created CUDA device with force_cuda=True")
-        return device
-
-    # 1) If user explicitly asked for 'mps' and it's available, use that
-    if device_str == "mps":
-        if torch.backends.mps.is_available():
-            device = torch.device("mps")
-            logger.info("Using MPS device (Apple Silicon).")
-            # Enable MPS optimizations
-            # Note: Additional MPS optimizations would go here
-            logger.info("Using MPS acceleration for Apple Silicon GPU")
-        else:
-            logger.warning("MPS requested but not available. Falling back to CPU.")
-            device = torch.device("cpu")
-
-    # 2) If user explicitly asked for 'cuda' and it's available, use that
-    elif device_str == "cuda":
-        if cuda_available:
-            device = torch.device("cuda")
-            logger.info("Using CUDA device (NVIDIA GPU).")
-        else:
-            logger.warning("CUDA requested but not available. Falling back to CPU.")
-            device = torch.device("cpu")
-
-    # 3) If user explicitly asked for 'cpu', use that
-    elif device_str == "cpu":
+        device_info['type'] = 'cuda'
+        device_info['gpu_count'] = gpu_info['cuda_device_count']
+        device_info['is_multi_gpu'] = device_info['gpu_count'] > 1
+        
+        if device_info['gpu_count'] > 0:
+            device_info['name'] = torch.cuda.get_device_name(0)
+        
+        logger.info(f"Using CUDA with {device_info['gpu_count']} device(s)")
+        if device_info['is_multi_gpu']:
+            logger.info(f"Multi-GPU training enabled with {device_info['gpu_count']} GPUs")
+        
+    elif device_str == "mps" and gpu_info['mps_available']:
+        # MPS path for Apple Silicon
+        device = torch.device("mps")
+        device_info['type'] = 'mps'
+        device_info['name'] = f"Apple {gpu_info['chip_model'] or 'Silicon'}"
+        logger.info(f"Using MPS for Apple Silicon: {device_info['name']}")
+        
+    elif device_str == "cpu" or (not device_str and not gpu_info['cuda_available'] and not gpu_info['mps_available']):
+        # CPU fallback
         device = torch.device("cpu")
-        logger.info("Using CPU device as requested.")
-
-    # 4) Otherwise, pick the best available automatically
+        device_info['type'] = 'cpu'
+        device_info['name'] = platform.processor() or "CPU"
+        logger.info(f"Using CPU: {device_info['name']}")
+        
     else:
-        if torch.backends.mps.is_available():
-            device = torch.device("mps")
-            logger.info("No device specified; using MPS for Apple Silicon.")
-            # Enable MPS optimizations
-            # Note: Additional MPS optimizations would go here
-            logger.info("Using MPS acceleration for Apple Silicon GPU")
-        elif cuda_available:
+        # Auto selection based on best available
+        if gpu_info['cuda_available']:
             device = torch.device("cuda")
-            logger.info("No device specified; using CUDA.")
+            device_info['type'] = 'cuda'
+            device_info['gpu_count'] = gpu_info['cuda_device_count']
+            device_info['is_multi_gpu'] = device_info['gpu_count'] > 1
+            
+            if device_info['gpu_count'] > 0:
+                device_info['name'] = torch.cuda.get_device_name(0)
+                
+            logger.info(f"Auto-selected CUDA with {device_info['gpu_count']} device(s)")
+            
+        elif gpu_info['mps_available']:
+            device = torch.device("mps")
+            device_info['type'] = 'mps'
+            device_info['name'] = f"Apple {gpu_info['chip_model'] or 'Silicon'}"
+            logger.info(f"Auto-selected MPS for Apple Silicon: {device_info['name']}")
+            
         else:
             device = torch.device("cpu")
-            logger.info("No device specified; using CPU.")
-
-    return device
+            device_info['type'] = 'cpu'
+            device_info['name'] = platform.processor() or "CPU"
+            logger.info(f"Auto-selected CPU: {device_info['name']}")
+    
+    # Return both the device and detailed info about the configuration
+    return device, device_info

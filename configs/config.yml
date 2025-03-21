@@ -46,6 +46,9 @@ hyperparameters:
   scheduler_type: "cosine" # Cosine annealing scheduler
   drop_last: true         # Drop last batch for more consistent batch sizes
   clip_value: 0.5         # Value for gradient clipping to prevent NaN issues
+  multigpu: true         # Enable multi-GPU training for p3dn.24xlarge
+  gradient_accumulation_steps: 2  # Number of batches to accumulate gradients
+  distributed_training: true  # Enable distributed training
 
 logging:
   level: "INFO"  # Could be DEBUG, INFO, WARNING, ERROR, etc.

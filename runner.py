@@ -96,9 +96,25 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                 mlflow.set_tag("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 mlflow.set_tag("user", os.environ.get("USER", "keirparker"))
 
-                # Determine which device to use
-                device = select_device(config)
+                # Determine which device to use with enhanced detection
+                device, device_info = select_device(config)
                 mlflow.log_param("device", device.type)
+                
+                # Log detailed device information
+                mlflow.log_param("device_name", device_info.get('name', 'Unknown'))
+                
+                if device_info.get('is_multi_gpu', False):
+                    mlflow.log_param("gpu_count", device_info.get('gpu_count', 0))
+                    mlflow.log_param("multi_gpu", True)
+                
+                # Log platform-specific optimizations
+                if device_info.get('aws_instance', None):
+                    mlflow.log_param("aws_instance", device_info['aws_instance'])
+                
+                if device_info.get('apple_silicon', False):
+                    mlflow.log_param("apple_silicon", True)
+                    if device_info.get('chip_model'):
+                        mlflow.log_param("chip_model", device_info['chip_model'])
 
                 # 1. Generate the base dataset + retrieve underlying function
                 logger.info(f"Generating {dataset_type} dataset...")
@@ -117,9 +133,8 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                 mlflow.set_tag("batch_id", batch_id)
                 mlflow.set_tag("experiment_batch", experiment_batch)
 
-                # Determine which device to use (again)
-                device = select_device(config)
-                mlflow.log_param("device", device.type)
+                # This second device selection is redundant and can be removed
+                # The device has already been determined and logged above
 
                 # 1. Generate the base dataset + retrieve underlying function (again)
                 logger.info(f"Generating {dataset_type} dataset...")

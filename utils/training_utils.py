@@ -185,9 +185,10 @@ def worker_init_fn(worker_id):
     random.seed(worker_seed + worker_id)
 
 
-def prepare_data_loaders(t_train, data_train, config, t_val=None, data_val=None, device=None):
+def prepare_data_loaders(t_train, data_train, config, t_val=None, data_val=None, device=None, device_info=None):
     """
     Prepare data loaders for training and validation with reproducible behavior.
+    Optimized for different hardware (CPU, CUDA, MPS) with support for DistributedDataParallel.
     Note: Data is kept on CPU so that pin_memory works. Move batches to GPU in the training loop.
 
     Args:
@@ -197,42 +198,106 @@ def prepare_data_loaders(t_train, data_train, config, t_val=None, data_val=None,
         t_val: Validation time points (optional)
         data_val: Validation data values (optional)
         device: PyTorch device (optional)
+        device_info: Additional device information dictionary (optional)
 
     Returns:
         tuple: (train_loader, val_loader)
     """
-
-
     # Get seed from config for reproducible shuffling
     seed = config.get("random_seed", 42)
 
-    batch_size = config["hyperparameters"].get("batch_size", 64)
+    # Get batch size with appropriate device-specific defaults
+    if "batch_size" in config["hyperparameters"]:
+        batch_size = config["hyperparameters"]["batch_size"]
+    elif device is not None and device.type == 'cuda':
+        # Larger batch size for CUDA
+        batch_size = 256
+    elif device is not None and device.type == 'mps':
+        # Medium batch size for MPS
+        batch_size = 128
+    else:
+        # Default for CPU
+        batch_size = 64
+    
+    # Make sure batch size isn't larger than dataset
     batch_size = min(batch_size, len(t_train))
-    num_workers = config["hyperparameters"].get("num_workers", 0)
-
+    
+    # Get workers with appropriate defaults for each platform
+    if "num_workers" in config["hyperparameters"]:
+        num_workers = config["hyperparameters"]["num_workers"]
+    elif device is not None and device.type == 'cuda':
+        # For CUDA, use more workers (scaled by GPU count)
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        num_workers = min(4 * gpu_count, 16)  # Cap at reasonable value
+    elif device is not None and device.type == 'mps':
+        # For MPS, use moderate number of workers
+        num_workers = 2
+    else:
+        # Default for CPU
+        num_workers = 1
+    
+    # For AWS p3dn.24xlarge, optimize workers further
+    if device_info and device_info.get('aws_instance') == 'p3dn.24xlarge':
+        # Use 2 workers per GPU for optimal throughput
+        num_workers = 16  # 2 workers × 8 GPUs
+    
     # Convert to PyTorch tensors (keep them on CPU for pin_memory to work)
     x_tensor = torch.from_numpy(t_train).float().unsqueeze(-1)
     y_tensor = torch.from_numpy(data_train).float().unsqueeze(-1)
 
-    # If you want to use GPU in the training loop, move data there then
-    # e.g., inside your training loop:
-    #   x_batch, y_batch = x_batch.to(device), y_batch.to(device)
-
     # Create reproducible generator for shuffling
     g = torch.Generator()
     g.manual_seed(seed)
-
-    train_dataset = torch.utils.data.TensorDataset(x_tensor, y_tensor)
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        worker_init_fn=worker_init_fn if num_workers > 0 else None,
-        generator=g,
-        drop_last=False,  # More deterministic to keep all samples
-        pin_memory=True  # Now works because tensors are on CPU
+    
+    # Check if we should use distributed sampler
+    use_distributed = (
+        config["hyperparameters"].get("distributed_training", False) and 
+        torch.cuda.is_available() and 
+        torch.cuda.device_count() > 1 and
+        torch.distributed.is_initialized()
     )
+    
+    train_dataset = torch.utils.data.TensorDataset(x_tensor, y_tensor)
+    
+    if use_distributed:
+        # For distributed training, use DistributedSampler
+        from torch.utils.data.distributed import DistributedSampler
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=torch.distributed.get_world_size(),
+            rank=torch.distributed.get_rank(),
+            shuffle=True,
+            seed=seed
+        )
+        
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=False,  # Don't shuffle when using sampler
+            sampler=train_sampler,
+            num_workers=num_workers,
+            worker_init_fn=worker_init_fn if num_workers > 0 else None,
+            pin_memory=True,
+            drop_last=config["hyperparameters"].get("drop_last", False),
+            persistent_workers=num_workers > 0  # Keep workers alive between epochs
+        )
+        
+        logger.info(f"Using DistributedSampler for training data - world size: {torch.distributed.get_world_size()}, rank: {torch.distributed.get_rank()}")
+    else:
+        # Standard DataLoader for single GPU or DataParallel
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            worker_init_fn=worker_init_fn if num_workers > 0 else None,
+            generator=g,
+            drop_last=config["hyperparameters"].get("drop_last", False),
+            pin_memory=True,
+            persistent_workers=num_workers > 0  # Keep workers alive between epochs
+        )
+    
+    logger.info(f"Created training DataLoader with batch_size={batch_size}, num_workers={num_workers}")
 
     val_loader = None
     if t_val is not None and data_val is not None:
@@ -240,14 +305,39 @@ def prepare_data_loaders(t_train, data_train, config, t_val=None, data_val=None,
         y_val_tensor = torch.from_numpy(data_val).float().unsqueeze(-1)
 
         val_dataset = torch.utils.data.TensorDataset(x_val_tensor, y_val_tensor)
-        val_loader = torch.utils.data.DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,  # No need to shuffle validation data
-            num_workers=num_workers,
-            worker_init_fn=worker_init_fn if num_workers > 0 else None,
-            pin_memory=True
-        )
+        
+        if use_distributed:
+            # For distributed validation, use DistributedSampler with no shuffle
+            from torch.utils.data.distributed import DistributedSampler
+            val_sampler = DistributedSampler(
+                val_dataset,
+                num_replicas=torch.distributed.get_world_size(),
+                rank=torch.distributed.get_rank(),
+                shuffle=False  # Don't shuffle validation
+            )
+            
+            val_loader = torch.utils.data.DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                sampler=val_sampler,
+                num_workers=num_workers,
+                worker_init_fn=worker_init_fn if num_workers > 0 else None,
+                pin_memory=True,
+                persistent_workers=num_workers > 0
+            )
+            
+            logger.info("Using DistributedSampler for validation data")
+        else:
+            val_loader = torch.utils.data.DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,  # No need to shuffle validation data
+                num_workers=num_workers,
+                worker_init_fn=worker_init_fn if num_workers > 0 else None,
+                pin_memory=True,
+                persistent_workers=num_workers > 0
+            )
 
     return train_loader, val_loader
 
@@ -286,7 +376,8 @@ def compute_metrics(y_true, y_pred):
     }
 def train_model(model, t_train, data_train, config, device, validation_split=0.2):
     """
-    Enhanced training loop with loss tracking and validation.
+    Enhanced training loop with loss tracking, validation, and multi-GPU support.
+    Optimized for both Apple Silicon and p3dn.24xlarge with 8x Tesla V100 GPUs.
 
     Args:
         model: A PyTorch model instance
@@ -299,6 +390,77 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
     Returns:
         dict: Training history (losses, metrics, etc.)
     """
+    # Get device information if available
+    device_info = None
+    if isinstance(device, tuple) and len(device) == 2:
+        # New format: device is actually a tuple of (device, device_info)
+        device, device_info = device
+    
+    # Check for multi-GPU capabilities
+    use_multi_gpu = config["hyperparameters"].get("multigpu", False) and torch.cuda.device_count() > 1
+    
+    # If we have device_info, use it to get more accurate GPU count
+    if device_info and device_info.get('is_multi_gpu', False):
+        num_gpus = device_info.get('gpu_count', torch.cuda.device_count())
+    else:
+        num_gpus = torch.cuda.device_count() if use_multi_gpu else 1
+    
+    # Set up gradient accumulation
+    gradient_accumulation_steps = int(config["hyperparameters"].get("gradient_accumulation_steps", 1))
+    if gradient_accumulation_steps > 1:
+        logger.info(f"Using gradient accumulation with {gradient_accumulation_steps} steps")
+    
+    # Detect if we're running on AWS p3dn.24xlarge
+    is_p3dn = False
+    if device_info and device_info.get('aws_instance') == 'p3dn.24xlarge':
+        logger.info("Detected p3dn.24xlarge instance - optimizing for 8x Tesla V100 GPUs")
+        is_p3dn = True
+        # Force settings for p3dn.24xlarge
+        use_multi_gpu = True
+        num_gpus = 8
+    
+    if use_multi_gpu and num_gpus > 1:
+        logger.info(f"Using {num_gpus} GPUs for training")
+        # Wrap model with DistributedDataParallel or DataParallel depending on setup
+        if config["hyperparameters"].get("distributed_training", False):
+            try:
+                # Try to initialize distributed backend if not already done
+                if not torch.distributed.is_initialized():
+                    # For AWS p3dn.24xlarge, use NCCL backend with specific settings
+                    if is_p3dn:
+                        # Set environment variables specifically for NCCL on p3dn
+                        import os
+                        os.environ["NCCL_DEBUG"] = "INFO"
+                        os.environ["NCCL_IB_DISABLE"] = "0"
+                        os.environ["NCCL_IB_GID_INDEX"] = "3"
+                        os.environ["NCCL_IB_TIMEOUT"] = "23"
+                        os.environ["NCCL_SOCKET_IFNAME"] = "^lo,docker"
+                        
+                        # Initialize process group with NCCL backend
+                        torch.distributed.init_process_group(backend="nccl", init_method="env://")
+                    else:
+                        # Generic initialization
+                        torch.distributed.init_process_group(backend="nccl")
+                    
+                    local_rank = torch.distributed.get_rank()
+                    torch.cuda.set_device(local_rank)
+                    logger.info(f"Initialized distributed process group, local rank: {local_rank}")
+                
+                # Use DDP for most efficient multi-GPU training
+                from torch.nn.parallel import DistributedDataParallel as DDP
+                model = DDP(model, device_ids=[device.index] if device.type == 'cuda' else None)
+                logger.info("Using DistributedDataParallel for multi-GPU training")
+            except (ImportError, RuntimeError) as e:
+                # Fall back to DataParallel if distributed fails
+                logger.warning(f"Failed to init distributed training: {e}, falling back to DataParallel")
+                from torch.nn.parallel import DataParallel
+                model = DataParallel(model)
+                logger.info("Using DataParallel for multi-GPU training")
+        else:
+            # Use DataParallel for simpler multi-GPU training
+            from torch.nn.parallel import DataParallel
+            model = DataParallel(model)
+            logger.info("Using DataParallel for multi-GPU training")
     # Get the random seed for reproducible validation split
     seed = config.get("random_seed", 42)
 
@@ -378,7 +540,7 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
     logger.info(f"Learning rate: {config['hyperparameters']['lr']}")
     logger.info(f"Gradient clip: {config['hyperparameters']['clip_value']}")
     
-    train_loader, val_loader = prepare_data_loaders(t_train, data_train, config, t_val, data_val, device)
+    train_loader, val_loader = prepare_data_loaders(t_train, data_train, config, t_val, data_val, device, device_info)
 
     # Set up loss function, optimizer, and scheduler
     criterion = nn.MSELoss()
@@ -427,14 +589,23 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
         # Training phase
         model.train()
         running_loss = 0.0
+        
+        # Track information for gradient accumulation
+        batch_count = 0
+        accumulated_loss = 0
+        accumulated_samples = 0
+        
         for x_batch, y_batch in train_loader:
+            batch_count += 1
+            
             # Move training batch to device with non_blocking for parallel transfer
             if device is not None:
                 x_batch = x_batch.to(device, non_blocking=True)
                 y_batch = y_batch.to(device, non_blocking=True)
                 
-            # Use zero_grad(set_to_none=True) for better performance
-            optimizer.zero_grad(set_to_none=True)
+            # Zero gradients only at the start of accumulation cycle
+            if (batch_count - 1) % gradient_accumulation_steps == 0:
+                optimizer.zero_grad(set_to_none=True)
             
             # Forward pass with optimizations for CUDA and MPS
             if device.type == 'cuda' and use_amp:
@@ -442,23 +613,24 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                     # Try the newer API first
                     with torch.amp.autocast(device_type='cuda'):
                         preds = model(x_batch)
-                        loss = criterion(preds, y_batch)
+                        # Scale loss by accumulation steps for consistent gradient values
+                        loss = criterion(preds, y_batch) / gradient_accumulation_steps
                 except TypeError:
                     # Fall back to the older API if device_type param not supported
                     with torch.amp.autocast():
                         preds = model(x_batch)
-                        loss = criterion(preds, y_batch)
+                        loss = criterion(preds, y_batch) / gradient_accumulation_steps
             elif device.type == 'mps' and use_amp:
                 # Try MPS AMP if enabled
                 try:
                     # First try newer API with device_type
                     with torch.amp.autocast(device_type='mps'):
                         preds = model(x_batch)
-                        loss = criterion(preds, y_batch)
+                        loss = criterion(preds, y_batch) / gradient_accumulation_steps
                 except (ValueError, RuntimeError, AttributeError, TypeError):
                     # Fallback to standard computation
                     preds = model(x_batch)
-                    loss = criterion(preds, y_batch)
+                    loss = criterion(preds, y_batch) / gradient_accumulation_steps
             else:
                 # CPU path or MPS without AMP
                 preds = model(x_batch)
@@ -468,64 +640,93 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                     logger.warning("NaN detected in model outputs, replacing with zeros")
                     preds = torch.where(torch.isnan(preds), torch.zeros_like(preds), preds)
                     
-                loss = criterion(preds, y_batch)
+                loss = criterion(preds, y_batch) / gradient_accumulation_steps
                 
                 # Check for NaN loss
                 if torch.isnan(loss):
                     logger.warning("NaN loss detected, using zero loss instead")
                     loss = torch.tensor(0.0, device=loss.device, requires_grad=True)
             
+            # Track loss for reporting (use the unscaled value)
+            batch_loss = loss.item() * gradient_accumulation_steps
+            running_loss += batch_loss * x_batch.size(0)
+            accumulated_loss += batch_loss * x_batch.size(0)
+            accumulated_samples += x_batch.size(0)
+            
             # Backward pass with gradient scaling for mixed precision
             if (device.type == 'cuda' or device.type == 'mps') and use_amp and scaler is not None:
                 # GPU path with mixed precision
                 scaler.scale(loss).backward()
                 
-                # Optional gradient clipping
-                if config["hyperparameters"].get("clip_gradients", True):
-                    clip_value = float(config["hyperparameters"].get("clip_value", 1.0))
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
-                
-                # Update weights with scaler
-                scaler.step(optimizer)
-                scaler.update()
+                # Only perform optimization step at the end of accumulation cycle
+                if (batch_count % gradient_accumulation_steps == 0) or (batch_count == len(train_loader)):
+                    # Optional gradient clipping
+                    if config["hyperparameters"].get("clip_gradients", True):
+                        clip_value = float(config["hyperparameters"].get("clip_value", 1.0))
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+                    
+                    # Update weights with scaler
+                    scaler.step(optimizer)
+                    scaler.update()
+                    
+                    # Log accumulated loss for better monitoring with multi-GPU
+                    if num_gpus > 1 and gradient_accumulation_steps > 1:
+                        avg_loss = accumulated_loss / accumulated_samples if accumulated_samples > 0 else 0
+                        logger.info(f"Accumulated step {batch_count//gradient_accumulation_steps}, " 
+                                   f"batch loss: {avg_loss:.6f}, samples: {accumulated_samples}")
+                        accumulated_loss = 0
+                        accumulated_samples = 0
             else:
                 # Standard backward pass (CPU or MPS without AMP)
                 loss.backward()
                 
-                # Apply standard gradient clipping for all devices
-                use_gradient_clipping = config["hyperparameters"].get("clip_gradients", True)
-                if use_gradient_clipping:
-                    clip_value = float(config["hyperparameters"].get("clip_value", 1.0))
+                # Only perform optimization step at the end of accumulation cycle
+                if (batch_count % gradient_accumulation_steps == 0) or (batch_count == len(train_loader)):
+                    # Apply standard gradient clipping for all devices
+                    use_gradient_clipping = config["hyperparameters"].get("clip_gradients", True)
+                    if use_gradient_clipping:
+                        clip_value = float(config["hyperparameters"].get("clip_value", 1.0))
+                        
+                        # Debug check for NaN gradients with improved tracing
+                        has_nan_grad = False
+                        for name, param in model.named_parameters():
+                            if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                                has_nan_grad = True
+                                logger.warning(f"NaN/Inf gradient detected in {name} before clipping")
+                                if device.type == 'cuda':
+                                    # Check CUDA memory status when NaN detected on CUDA device
+                                    try:
+                                        free_mem, total_mem = torch.cuda.mem_get_info()
+                                        logger.warning(f"CUDA memory: {free_mem/1e9:.2f}GB free / {total_mem/1e9:.2f}GB total")
+                                    except:
+                                        logger.warning("Could not retrieve CUDA memory info")
+                        
+                        # Apply gradient clipping to all params
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
                     
-                    # Debug check for NaN gradients - implement better tracing
-                    has_nan_grad = False
-                    for name, param in model.parameters():
-                        if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
-                            has_nan_grad = True
-                            logger.warning(f"NaN/Inf gradient detected in {name} before clipping")
-                            if device.type == 'cuda':
-                                # Check CUDA memory status when NaN detected on CUDA device
-                                try:
-                                    free_mem, total_mem = torch.cuda.mem_get_info()
-                                    logger.warning(f"CUDA memory: {free_mem/1e9:.2f}GB free / {total_mem/1e9:.2f}GB total")
-                                except:
-                                    logger.warning("Could not retrieve CUDA memory info")
+                    # Standard weight update
+                    optimizer.step()
                     
-                    # Apply gradient clipping to all params
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
-                
-                # Standard weight update
-                optimizer.step()
-                
-                # Check for NaN in parameters after update
-                has_nan = False
-                for param in model.parameters():
-                    if torch.isnan(param.data).any():
-                        has_nan = True
-                        logger.warning("NaN detected in model parameters after update, replacing with zeros")
-                        param.data = torch.where(torch.isnan(param.data), torch.zeros_like(param.data), param.data)
-            running_loss += loss.item() * x_batch.size(0)
+                    # Synchronize GPUs if using multiple GPU training
+                    if device.type == 'cuda' and num_gpus > 1:
+                        torch.cuda.synchronize()
+                    
+                    # Check for NaN in parameters after update
+                    has_nan = False
+                    for param in model.parameters():
+                        if torch.isnan(param.data).any():
+                            has_nan = True
+                            logger.warning("NaN detected in model parameters after update, replacing with zeros")
+                            param.data = torch.where(torch.isnan(param.data), torch.zeros_like(param.data), param.data)
+                    
+                    # Log accumulated loss for better monitoring with multi-GPU
+                    if num_gpus > 1 and gradient_accumulation_steps > 1:
+                        avg_loss = accumulated_loss / accumulated_samples if accumulated_samples > 0 else 0
+                        logger.info(f"Accumulated step {batch_count//gradient_accumulation_steps}, " 
+                                   f"batch loss: {avg_loss:.6f}, samples: {accumulated_samples}")
+                        accumulated_loss = 0
+                        accumulated_samples = 0
         epoch_loss = running_loss / len(train_loader.dataset)
         history["train_loss"].append(epoch_loss)
         history["learning_rate"].append(optimizer.param_groups[0]["lr"])
