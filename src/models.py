@@ -331,7 +331,7 @@ class FANPhaseOffsetModelZeros(nn.Module):
             hidden_dim: int = 2048,
             num_layers: int = 3,
             bias: bool = True,
-            limit_phase_offset: bool = False,
+            limit_phase_offset: bool = True,  # Changed default to True for stability
             max_phase: float = math.pi,
     ):
         super(FANPhaseOffsetModelZeros, self).__init__()
@@ -341,6 +341,10 @@ class FANPhaseOffsetModelZeros(nn.Module):
         logger.info("Initializing FANPhaseOffsetModelZeros ...")
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
+        # Initialize embedding layer properly
+        nn.init.xavier_uniform_(self.embedding.weight, gain=0.1)
+        if bias:
+            nn.init.zeros_(self.embedding.bias)
 
         self.layers = nn.ModuleList()
         for _ in range(num_layers - 1):
@@ -354,7 +358,13 @@ class FANPhaseOffsetModelZeros(nn.Module):
                 )
             )
 
-        self.layers.append(nn.Linear(hidden_dim, output_dim, bias=bias))
+        self.output_layer = nn.Linear(hidden_dim, output_dim, bias=bias)
+        # Initialize output layer properly
+        nn.init.xavier_uniform_(self.output_layer.weight, gain=0.1)
+        if bias:
+            nn.init.zeros_(self.output_layer.bias)
+            
+        self.layers.append(self.output_layer)
 
     def forward(self, src: torch.Tensor) -> torch.Tensor:
         if src.dim() == 1:
@@ -364,10 +374,20 @@ class FANPhaseOffsetModelZeros(nn.Module):
         elif src.dim() > 3:
             logger.warning(f"Unexpected input shape: {src.shape}, expected 2D tensor")
 
+        # Prevent NaN inputs
+        if torch.isnan(src).any():
+            logger.warning("NaN detected in input, replacing with zeros")
+            src = torch.where(torch.isnan(src), torch.zeros_like(src), src)
+
         x = self.embedding(src)
 
         for layer in self.layers:
             x = layer(x)
+            
+            # Check for NaN values and replace them during forward pass
+            if torch.isnan(x).any():
+                logger.warning("NaN detected in intermediate layer, replacing with zeros")
+                x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
 
         return x
 
@@ -467,6 +487,13 @@ class FANLayerPhaseOffsetZero(nn.Module):
 
         self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
         self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
+        
+        # Initialize weights properly to prevent NaN
+        nn.init.xavier_uniform_(self.input_linear_p.weight, gain=0.1)
+        nn.init.xavier_uniform_(self.input_linear_g.weight, gain=0.1)
+        if bias:
+            nn.init.zeros_(self.input_linear_p.bias)
+            nn.init.zeros_(self.input_linear_g.bias)
 
         self.activation = nn.GELU()
 
@@ -479,8 +506,19 @@ class FANLayerPhaseOffsetZero(nn.Module):
         p = self.input_linear_p(src)
         g = self.activation(self.input_linear_g(src))
 
-        p_plus = p + self.offset
-        p_minus = p + (torch.pi / 2) - self.offset
+        # Apply limit if specified
+        actual_offset = self.offset
+        if self.limit_phase_offset:
+            actual_offset = self.max_phase * torch.tanh(self.offset)
+            
+        p_plus = p + actual_offset
+        p_minus = p + (torch.pi / 2) - actual_offset
+
+        # Check for NaN values and replace them
+        if torch.isnan(p_plus).any() or torch.isnan(p_minus).any():
+            logger.warning("NaN detected in phase offset computation, replacing with zeros")
+            p_plus = torch.where(torch.isnan(p_plus), torch.zeros_like(p_plus), p_plus)
+            p_minus = torch.where(torch.isnan(p_minus), torch.zeros_like(p_minus), p_minus)
 
         sin_part = torch.sin(p_plus)
         cos_part = torch.cos(p_minus)

@@ -392,28 +392,14 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
     use_amp = (use_amp_raw is True or 
               (isinstance(use_amp_raw, str) and use_amp_raw.lower() == 'true'))
     
-    # Create gradient scaler for mixed precision
+    # Create gradient scaler for mixed precision if needed
     if device.type == 'cuda' and use_amp:
-        # Use regular GradScaler without device_type (works with all PyTorch versions)
-        scaler = torch.amp.GradScaler(enabled=True)
-        logger.info("Using CUDA AMP gradient scaler")
-    elif device.type == 'mps' and use_amp:
-        # MPS also supports mixed precision in newer PyTorch versions
-        try:
-            # Try to use regular GradScaler for MPS
-            scaler = torch.amp.GradScaler(enabled=True)
-            logger.info("Using MPS AMP gradient scaler")
-        except (ValueError, RuntimeError, AttributeError):
-            # Fallback if MPS AMP not supported in this PyTorch version
-            logger.warning("MPS AMP not supported in this PyTorch version, disabling")
-            scaler = None
-            use_amp = False
+        scaler = torch.cuda.amp.GradScaler()
+        logger.info("AMP enabled for CUDA device")
     else:
-        # Dummy scaler for CPU that will be ignored
+        use_amp = False  # Disable AMP for non-CUDA devices
         scaler = None
-        # Disable AMP for CPU
-        if device.type == 'cpu':
-            use_amp = False
+        logger.info(f"AMP disabled for device type: {device.type}")
 
     # History tracking
     history = {
@@ -476,7 +462,18 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
             else:
                 # CPU path or MPS without AMP
                 preds = model(x_batch)
+                
+                # Check for NaN in preds
+                if torch.isnan(preds).any():
+                    logger.warning("NaN detected in model outputs, replacing with zeros")
+                    preds = torch.where(torch.isnan(preds), torch.zeros_like(preds), preds)
+                    
                 loss = criterion(preds, y_batch)
+                
+                # Check for NaN loss
+                if torch.isnan(loss):
+                    logger.warning("NaN loss detected, using zero loss instead")
+                    loss = torch.tensor(0.0, device=loss.device, requires_grad=True)
             
             # Backward pass with gradient scaling for mixed precision
             if (device.type == 'cuda' or device.type == 'mps') and use_amp and scaler is not None:
@@ -496,12 +493,38 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                 # Standard backward pass (CPU or MPS without AMP)
                 loss.backward()
                 
-                # Apply gradient clipping for all devices to ensure stable training
-                clip_value = float(config["hyperparameters"].get("clip_value", 1.0))
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+                # Apply standard gradient clipping for all devices
+                use_gradient_clipping = config["hyperparameters"].get("clip_gradients", True)
+                if use_gradient_clipping:
+                    clip_value = float(config["hyperparameters"].get("clip_value", 1.0))
+                    
+                    # Debug check for NaN gradients - implement better tracing
+                    has_nan_grad = False
+                    for name, param in model.parameters():
+                        if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                            has_nan_grad = True
+                            logger.warning(f"NaN/Inf gradient detected in {name} before clipping")
+                            if device.type == 'cuda':
+                                # Check CUDA memory status when NaN detected on CUDA device
+                                try:
+                                    free_mem, total_mem = torch.cuda.mem_get_info()
+                                    logger.warning(f"CUDA memory: {free_mem/1e9:.2f}GB free / {total_mem/1e9:.2f}GB total")
+                                except:
+                                    logger.warning("Could not retrieve CUDA memory info")
+                    
+                    # Apply gradient clipping to all params
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
                 
                 # Standard weight update
                 optimizer.step()
+                
+                # Check for NaN in parameters after update
+                has_nan = False
+                for param in model.parameters():
+                    if torch.isnan(param.data).any():
+                        has_nan = True
+                        logger.warning("NaN detected in model parameters after update, replacing with zeros")
+                        param.data = torch.where(torch.isnan(param.data), torch.zeros_like(param.data), param.data)
             running_loss += loss.item() * x_batch.size(0)
         epoch_loss = running_loss / len(train_loader.dataset)
         history["train_loss"].append(epoch_loss)

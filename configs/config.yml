@@ -1,7 +1,7 @@
 experiment_name: "new graphs"
 
 models_to_run:
-  - MLP
+#  - MLP
   - FAN
   - FANGated
   - FANPhaseOffsetModel
@@ -35,8 +35,8 @@ hyperparameters:
   test_samples: 10000
   noise_level: 0.15
   sparsity_factor: 0.5
-  epochs: 10000
-  lr: 0.00001              # Higher learning rate for faster convergence
+  epochs: 10
+  lr: 0.0001              # Original learning rate for FAN
   weight_decay: 0.00001   # L2 regularization for better generalization (as float)
   batch_size: 256         # Larger batch size for better hardware utilization
   num_workers: 4          # Use multiple CPU workers for data loading
@@ -45,6 +45,7 @@ hyperparameters:
   use_scheduler: true     # Enable learning rate scheduling
   scheduler_type: "cosine" # Cosine annealing scheduler
   drop_last: true         # Drop last batch for more consistent batch sizes
+  clip_value: 0.5         # Value for gradient clipping to prevent NaN issues
 
 logging:
   level: "INFO"  # Could be DEBUG, INFO, WARNING, ERROR, etc.

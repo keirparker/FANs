@@ -130,42 +130,34 @@ def combined_freq_amp_modulation_fn(x: np.ndarray) -> np.ndarray:
 # PERIODIC_SPECS holds domain parameters and data functions for each signal type
 PERIODIC_SPECS = {
     "sin": {
-        "data_params": {
-            "period": 6,
-            "domain_train": lambda p, ns: np.linspace(-10*p*np.pi, 10*p*np.pi, ns),
-            "domain_test":  lambda p, ns: np.linspace(-25*p*np.pi, 25*p*np.pi, ns),
-        },
-        "training_params": {
+        "period": 6,
+        "domain_train": lambda p, ns: np.linspace(-10*p, 10*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-25*p, 25*p, ns),
+        "data_fn": lambda t: np.sin(t),
+        "config": {
             "batchsize": 32,
             "numepoch": 10000,
             "printepoch": 50,
             "lr": 1e-5,
             "wd": 0.01,
-        },
-        "viz_params": {
-            "y_upper": 1.5,
+            "y_uper": 1.5,
             "y_lower": -1.5,
-        },
-        "data_fn": lambda t: np.sin(t),
+        }
     },
     "mod": {
-        "data_params": {
-            "period": 20,
-            "domain_train": lambda p, ns: np.linspace(-10*p, 10*p, ns),
-            "domain_test":  lambda p, ns: np.linspace(-25*p, 25*p, ns),
-        },
-        "training_params": {
+        "period": 20,
+        "domain_train": lambda p, ns: np.linspace(-10*p, 10*p, ns),
+        "domain_test":  lambda p, ns: np.linspace(-25*p, 25*p, ns),
+        "data_fn": lambda t: np.mod(t, 5),
+        "config": {
             "batchsize": 32,
             "numepoch": 10000,
             "printepoch": 50,
             "lr": 1e-5,
             "wd": 0.01,
-        },
-        "viz_params": {
-            "y_upper": 10,
+            "y_uper": 10,
             "y_lower": -5,
-        },
-        "data_fn": lambda t: np.mod(t, 5),
+        }
     },
     "complex_1": {
         "period": 4,
@@ -274,8 +266,8 @@ PERIODIC_SPECS = {
     },
     "gradually_increasing_frequency": {
         "period": 5,  # Larger period for more room to show frequency increase
-        "domain_train": lambda p, ns: np.linspace(-5*p, 15*p, ns),  # Asymmetric range
-        "domain_test":  lambda p, ns: np.linspace(-10*p, 25*p, ns), # Extend further right for testing
+        "domain_train": lambda p, ns: np.linspace(-10*p, 10*p, ns),  # Asymmetric range
+        "domain_test":  lambda p, ns: np.linspace(-25*p, 25*p, ns), # Extend further right for testing
         "data_fn":      gradually_increasing_frequency_fn,
         "config": {
             "batchsize": 64,
@@ -289,8 +281,8 @@ PERIODIC_SPECS = {
     },
     "gradually_increasing_amplitude": {
         "period": 5,  # Larger period to show the full amplitude increase
-        "domain_train": lambda p, ns: np.linspace(-5*p, 15*p, ns),  # Asymmetric range
-        "domain_test":  lambda p, ns: np.linspace(-10*p, 25*p, ns), # Extend further right for testing
+        "domain_train": lambda p, ns: np.linspace(-10*p, 10*p, ns),  # Asymmetric range
+        "domain_test":  lambda p, ns: np.linspace(-25*p, 25*p, ns), # Extend further right for testing
         "data_fn":      gradually_increasing_amplitude_fn,
         "config": {
             "batchsize": 64,
@@ -303,23 +295,19 @@ PERIODIC_SPECS = {
         }
     },
     "combined_freq_amp_modulation": {
-        "data_params": {
-            "period": 5,  # Match other gradually increasing functions
-            "domain_train": lambda p, ns: np.linspace(-5*p, 15*p, ns),  # Asymmetric range
-            "domain_test":  lambda p, ns: np.linspace(-10*p, 25*p, ns), # Extend further right for testing
-        },
-        "training_params": {
+        "period": 5,  # Match other gradually increasing functions
+        "domain_train": lambda p, ns: np.linspace(-10*p, 10*p, ns),  # Asymmetric range
+        "domain_test":  lambda p, ns: np.linspace(-25*p, 25*p, ns), # Extend further right for testing
+        "data_fn": combined_freq_amp_modulation_fn,
+        "config": {
             "batchsize": 64,
             "numepoch": 5000,
             "printepoch": 50,
             "lr": 1e-4,
             "wd": 0.001,
-        },
-        "viz_params": {
-            "y_upper": 1.0,
+            "y_uper": 1.0,
             "y_lower": -1.0,
-        },
-        "data_fn": combined_freq_amp_modulation_fn,
+        }
     }
 }
 
@@ -371,27 +359,19 @@ def get_periodic_data(periodic_type, num_train_samples=None, num_test_samples=No
     if num_test_samples is None:
         num_test_samples = 4000
         
-    # Special handling for gradual changing functions
-    if periodic_type in ["increasing_amp_freq", "gradually_increasing_amplitude", 
-                         "gradually_increasing_frequency", "combined_freq_amp_modulation"]:
-        min_x, max_x = -50, 50
-        
-        t_train = np.linspace(min_x, max_x, num_train_samples)
-        data_train = data_fn(t_train)
-        
-        t_test = np.concatenate([
-            np.linspace(min_x - 20, min_x, num_test_samples // 4),
-            np.linspace(min_x, max_x, num_test_samples // 2),
-            np.linspace(max_x, max_x + 20, num_test_samples // 4)
-        ])
-        data_test = data_fn(t_test)
-    else:
-        # Normal handling for other function types
-        t_train = domain_train(period, num_train_samples)
-        data_train = data_fn(t_train)
-        
-        t_test = domain_test(period, num_test_samples)
-        data_test = data_fn(t_test)
+    # Use consistent domain handling for all function types
+    # Scale domain based on period for all functions
+    min_x_train, max_x_train = -10*period, 10*period
+    
+    t_train = np.linspace(min_x_train, max_x_train, num_train_samples)
+    data_train = data_fn(t_train)
+    
+    # For test, extend beyond training domain in both directions
+    min_x_test, max_x_test = -25*period, 25*period
+    
+    # Create test data with extra points in the extrapolation regions
+    t_test = np.linspace(min_x_test, max_x_test, num_test_samples)
+    data_test = data_fn(t_test)
 
     true_func = data_fn
     return t_train, data_train, t_test, data_test, config, true_func
