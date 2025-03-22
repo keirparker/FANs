@@ -18,7 +18,7 @@ import numpy as np
 from utils.config_utils import load_config, setup_environment
 from utils.device_utils import select_device
 from utils.data_utils import add_noise, make_sparse
-from utils.training_utils import train_model
+from utils.training_utils import train_model, create_optimizer, create_scheduler
 from utils.modelling_utils import evaluate_model
 from utils.evaluation_utils import (
     generate_model_summary_table,

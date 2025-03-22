@@ -97,7 +97,7 @@ def create_scheduler(optimizer, config):
         return None
         
     # Set a minimum learning rate floor to prevent numerical instability from tiny gradients
-    min_lr = config["hyperparameters"].get("min_lr", 1e-7)
+    min_lr = float(config["hyperparameters"].get("min_lr", 1e-7))
     logger.info(f"Setting minimum learning rate floor to {min_lr}")
 
     # If NaN detection is enabled, use more conservative schedulers
@@ -130,8 +130,8 @@ def create_scheduler(optimizer, config):
                 logger.info(f"Using ReduceLROnPlateau for CUDA with patience={patience}, factor={factor}")
                 
             return optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode="min", factor=factor, patience=patience, verbose=True, 
-                min_lr=min_lr, threshold=threshold, cooldown=2  # Added cooldown period
+                optimizer, mode="min", factor=float(factor), patience=int(patience), verbose=True, 
+                min_lr=float(min_lr), threshold=float(threshold), cooldown=2  # Added cooldown period
             )
         elif scheduler_type == "cosine":
             # For long training runs, cosine annealing can contribute to NaN issues
@@ -139,16 +139,16 @@ def create_scheduler(optimizer, config):
             if nan_detection_enabled:
                 logger.info(f"Using safer OneCycleLR for CUDA (NaN prevention mode)")
                 # Use OneCycleLR which maintains higher LR in the middle of training
-                max_lr = optimizer.param_groups[0]['lr'] * 3.0  # Peak at 3x initial LR
+                max_lr = float(optimizer.param_groups[0]['lr']) * 3.0  # Peak at 3x initial LR
                 return optim.lr_scheduler.OneCycleLR(
                     optimizer, max_lr=max_lr, total_steps=epochs,
-                    pct_start=0.3, final_div_factor=max(1.0/(min_lr / optimizer.param_groups[0]['lr']), 25.0)
+                    pct_start=0.3, final_div_factor=max(1.0/(min_lr / float(optimizer.param_groups[0]['lr'])), 25.0)
                 )
             else:
                 logger.info(f"Using CosineAnnealingWarmRestarts for CUDA with T_0={epochs//3}")
                 # Use warm restarts for CUDA - standard configuration
                 return optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                    optimizer, T_0=epochs//3, T_mult=1, eta_min=min_lr
+                    optimizer, T_0=int(epochs//3), T_mult=1, eta_min=float(min_lr)
                 )
         elif scheduler_type == "step":
             step_size = int(config["hyperparameters"].get("scheduler_step_size", 10))
@@ -163,14 +163,14 @@ def create_scheduler(optimizer, config):
             factor = config["hyperparameters"].get("scheduler_factor", 0.5)  # Gentler reduction
             logger.info(f"Using ReduceLROnPlateau for MPS with patience={patience}, factor={factor}")
             return optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode="min", factor=factor, patience=patience, verbose=True,
+                optimizer, mode="min", factor=float(factor), patience=int(patience), verbose=True,
                 min_lr=1e-6, threshold=1e-4
             )
         elif scheduler_type == "cosine":
             logger.info(f"Using CosineAnnealingLR for MPS with T_max={epochs}")
             # Standard cosine for MPS
             return optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=epochs, eta_min=1e-6
+                optimizer, T_max=int(epochs), eta_min=1e-6
             )
         elif scheduler_type == "step":
             step_size = int(config["hyperparameters"].get("scheduler_step_size", 15))  # Larger step size
@@ -183,11 +183,11 @@ def create_scheduler(optimizer, config):
         patience = config["hyperparameters"].get("scheduler_patience", 5)
         factor = config["hyperparameters"].get("scheduler_factor", 0.5)
         return optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=factor, patience=patience, verbose=True
+            optimizer, mode="min", factor=float(factor), patience=int(patience), verbose=True
         )
     elif scheduler_type == "cosine":
         return optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=epochs
+            optimizer, T_max=int(epochs)
         )
     elif scheduler_type == "step":
         step_size = int(config["hyperparameters"].get("scheduler_step_size", 10))
