@@ -2,6 +2,7 @@ experiment_name: "run "
 
 models_to_run:
   - FANPhaseOffsetModel
+  - FANPhaseOffsetModelUniform
   - FANPhaseOffsetModelLimited
   - FANOffsetOnlyCosModel
   - FANGated

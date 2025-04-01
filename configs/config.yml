@@ -6,6 +6,7 @@ models_to_run:
   - FANGated
   - FANPhaseOffsetModel
   - FANPhaseOffsetModelGated
+  - FANPhaseOffsetModelUniform
 #  - FANAmplitudePhaseModel
 #  - FANUnconstrainedBasisModel
 
@@ -75,7 +76,6 @@ logging:
   level: "INFO"  # Could be DEBUG, INFO, WARNING, ERROR, etc.
 
 random_seed: 42
-
 # Performance settings
 # 'fast': Maximizes speed on hardware like Tesla V100 GPUs
 # 'deterministic': Ensures reproducible results, but slower

@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import time
+import math
 
 import torch
 import torch.nn as nn
@@ -153,8 +154,14 @@ def evaluate_model(model, t_test, data_test, device):
         # Count model parameters
         num_params = count_params(model)
         
-        # Get input size for FLOPs calculation (assumes 1D input)
-        input_size = (1,)  # Most models expect (batch_size, features)
+        # Get input size for FLOPs calculation based on model type
+        # Most models expect (batch_size, features), 
+        # but FAN models need (batch_size, sequence_length) for their forward pass
+        if "FAN" in model.__class__.__name__:
+            # Use appropriate input size for FAN models
+            input_size = (1, 1)
+        else:
+            input_size = (1,)
         
         # Count FLOPs for a single forward pass
         flops = count_flops(model, input_size)
@@ -164,6 +171,16 @@ def evaluate_model(model, t_test, data_test, device):
         
         # Measure inference time (average over multiple runs)
         inference_time = measure_inference_time(model, input_size, num_repeats=50)
+        
+        # Check for NaN values in the metrics
+        if math.isnan(flops) or math.isnan(mflops) or math.isnan(inference_time):
+            logger.warning(f"NaN values detected in efficiency metrics for {model.__class__.__name__}")
+            # Try with a different input shape
+            alternate_input_size = (1, 1) if input_size == (1,) else (1,)
+            logger.info(f"Retrying with alternate input size: {alternate_input_size}")
+            flops = count_flops(model, alternate_input_size)
+            mflops = flops / 1e6
+            inference_time = measure_inference_time(model, alternate_input_size, num_repeats=50)
         
         # Add efficiency metrics to the results
         metrics = {

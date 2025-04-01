@@ -51,7 +51,7 @@ class FANLayer(nn.Module):
         super(FANLayer, self).__init__()
         logger.debug("Initializing FANLayer ...")
         self.input_linear_p = nn.Linear(input_dim, output_dim // 4, bias=bias)
-        self.input_linear_g = nn.Linear(input_dim, (output_dim - output_dim // 2))
+        self.input_linear_g = nn.Linear(input_dim, (output_dim - output_dim // 2), bias=bias)
         self.activation = nn.GELU()
 
     def forward(self, src):
@@ -223,6 +223,13 @@ class FANLayerPhaseOffset(nn.Module):
 
         self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
         self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
+        
+        # Initialize weights properly to prevent NaN
+        nn.init.xavier_uniform_(self.input_linear_p.weight, gain=0.1)
+        nn.init.xavier_uniform_(self.input_linear_g.weight, gain=0.1)
+        if bias:
+            nn.init.zeros_(self.input_linear_p.bias)
+            nn.init.zeros_(self.input_linear_g.bias)
 
         self.activation = nn.GELU()
         self.offset = nn.Parameter(torch.full((p_dim,), math.pi / 4))
@@ -258,6 +265,57 @@ class FANPhaseOffsetModel(nn.Module):
             self.layers.append(FANLayerPhaseOffset(hidden_dim, hidden_dim, bias=bias))
 
         self.layers.append(nn.Linear(hidden_dim, output_dim, bias=bias))
+
+    def forward(self, src):
+        if src.dim() == 1:
+            src = src.unsqueeze(1)
+        elif src.dim() > 2:
+            batch_size = src.shape[0]
+            src = src.reshape(batch_size, -1)
+            if src.shape[1] > 1:
+                src = src[:, :1]
+
+        x = self.embedding(src)
+
+        for layer in self.layers:
+            x = layer(x)
+
+        return x
+        
+@register_model("FANPhaseOffsetModelUniform")
+class FANPhaseOffsetModelUniform(nn.Module):
+    def __init__(
+            self, input_dim=1, output_dim=1, hidden_dim=2048, num_layers=3, bias=True
+    ):
+        super(FANPhaseOffsetModelUniform, self).__init__()
+
+        logger.info("Initializing FANPhaseOffsetModelUniform with uniform phase initialization in [0, 2π) ...")
+        self.input_dim = input_dim
+
+        self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
+        nn.init.xavier_uniform_(self.embedding.weight, gain=0.1)
+        if bias:
+            nn.init.zeros_(self.embedding.bias)
+
+        # Create a custom FANLayerPhaseOffset class for this model
+        class FANLayerPhaseOffsetUniform(FANLayerPhaseOffset):
+            def __init__(self, input_dim, output_dim, bias=True):
+                super(FANLayerPhaseOffsetUniform, self).__init__(input_dim, output_dim, bias)
+                # Override the offset initialization to use uniform distribution in [0, 2π)
+                p_dim = output_dim // 4
+                # Initialize offset parameters uniformly in [0, 2π)
+                self.offset = nn.Parameter(torch.empty(p_dim).uniform_(0, 2 * math.pi))
+                
+        self.layers = nn.ModuleList()
+        for _ in range(num_layers - 1):
+            self.layers.append(FANLayerPhaseOffsetUniform(hidden_dim, hidden_dim, bias=bias))
+
+        self.output_layer = nn.Linear(hidden_dim, output_dim, bias=bias)
+        nn.init.xavier_uniform_(self.output_layer.weight, gain=0.1)
+        if bias:
+            nn.init.zeros_(self.output_layer.bias)
+            
+        self.layers.append(self.output_layer)
 
     def forward(self, src):
         if src.dim() == 1:
@@ -319,6 +377,60 @@ class FANLayerPhaseOffsetLimited(nn.Module):
         cos_part = torch.cos(p_minus)
 
         output = torch.cat([sin_part, cos_part, g], dim=-1)
+        return output
+
+
+@register_model("FANLayerPhaseOffsetZero")
+class FANLayerPhaseOffsetZero(nn.Module):
+    def __init__(self, input_dim, output_dim, bias=True, limit_phase_offset=False, max_phase=math.pi):
+        super(FANLayerPhaseOffsetZero, self).__init__()
+
+        if output_dim % 2 != 0:
+            raise ValueError(
+                "Output dimension must be even, so half can be allocated to g."
+            )
+        p_dim = output_dim // 4
+        g_dim = output_dim // 2
+
+        self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
+        self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
+        
+        # Initialize weights properly to prevent NaN
+        nn.init.xavier_uniform_(self.input_linear_p.weight, gain=0.1)
+        nn.init.xavier_uniform_(self.input_linear_g.weight, gain=0.1)
+        if bias:
+            nn.init.zeros_(self.input_linear_p.bias)
+            nn.init.zeros_(self.input_linear_g.bias)
+
+        self.activation = nn.GELU()
+
+        self.limit_phase_offset = limit_phase_offset
+        self.max_phase = max_phase
+
+        self.offset = nn.Parameter(torch.zeros(p_dim))
+
+    def forward(self, src):
+        p = self.input_linear_p(src)
+        g = self.activation(self.input_linear_g(src))
+
+        # Apply limit if specified
+        actual_offset = self.offset
+        if self.limit_phase_offset:
+            actual_offset = self.max_phase * torch.tanh(self.offset)
+            
+        p_plus = p + actual_offset
+        p_minus = p + (torch.pi / 2) - actual_offset
+
+        # Check for NaN values and replace them
+        if torch.isnan(p_plus).any() or torch.isnan(p_minus).any():
+            logger.warning("NaN detected in phase offset computation, replacing with zeros")
+            p_plus = torch.where(torch.isnan(p_plus), torch.zeros_like(p_plus), p_plus)
+            p_minus = torch.where(torch.isnan(p_minus), torch.zeros_like(p_minus), p_minus)
+
+        sin_part = torch.sin(p_plus)
+        cos_part = torch.cos(p_minus)
+
+        output = torch.cat((sin_part, cos_part, g), dim=-1)
         return output
 
 
@@ -442,13 +554,13 @@ class FANLayerPhaseOffsetGated(nn.Module):
 class FANPhaseOffsetModelGated(nn.Module):
     def __init__(
             self, input_dim=1, output_dim=1, hidden_dim=2048, num_layers=3, bias=True
-    ):  # Return to original parameters
+    ):
         super(FANPhaseOffsetModelGated, self).__init__()
         logger.info("Initializing FANPhaseOffsetModelGated ...")
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
-        # Initialize with standard values (default gain=1.0)
-        nn.init.xavier_uniform_(self.embedding.weight)
+        # Initialize with consistent gain=0.1 value as other FAN models
+        nn.init.xavier_uniform_(self.embedding.weight, gain=0.1)
         if bias:
             nn.init.zeros_(self.embedding.bias)
 
@@ -459,72 +571,38 @@ class FANPhaseOffsetModelGated(nn.Module):
             )
 
         self.output_layer = nn.Linear(hidden_dim, output_dim, bias=bias) 
-        # Initialize output layer with standard weights
-        nn.init.xavier_uniform_(self.output_layer.weight)
+        # Initialize output layer with consistent gain
+        nn.init.xavier_uniform_(self.output_layer.weight, gain=0.1)
         if bias:
             nn.init.zeros_(self.output_layer.bias)
             
         self.layers.append(self.output_layer)
 
     def forward(self, src):
+        # Handle input shape properly for consistency with other models
+        if src.dim() == 1:
+            src = src.unsqueeze(-1)
+        elif src.dim() == 3:
+            src = src.squeeze(1)
+        elif src.dim() > 3:
+            logger.warning(f"Unexpected input shape: {src.shape}, expected 2D tensor")
+            
+        # Prevent NaN inputs
+        if torch.isnan(src).any():
+            logger.warning("NaN detected in input, replacing with zeros")
+            src = torch.where(torch.isnan(src), torch.zeros_like(src), src)
+
         x = self.embedding(src)
+        
         for layer in self.layers:
             x = layer(x)
-        return x
-
-
-@register_model("FANLayerPhaseOffsetZero")
-class FANLayerPhaseOffsetZero(nn.Module):
-    def __init__(self, input_dim, output_dim, bias=True, limit_phase_offset=False, max_phase=math.pi):
-        super(FANLayerPhaseOffsetZero, self).__init__()
-
-        if output_dim % 2 != 0:
-            raise ValueError(
-                "Output dimension must be even, so half can be allocated to g."
-            )
-        p_dim = output_dim // 4
-        g_dim = output_dim // 2
-
-        self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
-        self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
-        
-        # Initialize weights properly to prevent NaN
-        nn.init.xavier_uniform_(self.input_linear_p.weight, gain=0.1)
-        nn.init.xavier_uniform_(self.input_linear_g.weight, gain=0.1)
-        if bias:
-            nn.init.zeros_(self.input_linear_p.bias)
-            nn.init.zeros_(self.input_linear_g.bias)
-
-        self.activation = nn.GELU()
-
-        self.limit_phase_offset = limit_phase_offset
-        self.max_phase = max_phase
-
-        self.offset = nn.Parameter(torch.zeros(p_dim))
-
-    def forward(self, src):
-        p = self.input_linear_p(src)
-        g = self.activation(self.input_linear_g(src))
-
-        # Apply limit if specified
-        actual_offset = self.offset
-        if self.limit_phase_offset:
-            actual_offset = self.max_phase * torch.tanh(self.offset)
             
-        p_plus = p + actual_offset
-        p_minus = p + (torch.pi / 2) - actual_offset
-
-        # Check for NaN values and replace them
-        if torch.isnan(p_plus).any() or torch.isnan(p_minus).any():
-            logger.warning("NaN detected in phase offset computation, replacing with zeros")
-            p_plus = torch.where(torch.isnan(p_plus), torch.zeros_like(p_plus), p_plus)
-            p_minus = torch.where(torch.isnan(p_minus), torch.zeros_like(p_minus), p_minus)
-
-        sin_part = torch.sin(p_plus)
-        cos_part = torch.cos(p_minus)
-
-        output = torch.cat((sin_part, cos_part, g), dim=-1)
-        return output
+            # Check for NaN values and replace them during forward pass
+            if torch.isnan(x).any():
+                logger.warning("NaN detected in intermediate layer, replacing with zeros")
+                x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
+                
+        return x
 
 
 @register_model("FANLayerAmplitudePhase")
