@@ -323,7 +323,7 @@ class FANLayerPhaseOffsetLimited(nn.Module):
 
 
 @register_model("FANPhaseOffsetModelZero")
-class FANPhaseOffsetModelZeros(nn.Module):
+class FANPhaseOffsetModelZero(nn.Module):
     def __init__(
             self,
             input_dim: int = 1,
@@ -334,11 +334,11 @@ class FANPhaseOffsetModelZeros(nn.Module):
             limit_phase_offset: bool = True,  # Changed default to True for stability
             max_phase: float = math.pi,
     ):
-        super(FANPhaseOffsetModelZeros, self).__init__()
+        super(FANPhaseOffsetModelZero, self).__init__()
         if num_layers < 2:
             raise ValueError("num_layers must be >= 2 (embedding + final at minimum).")
 
-        logger.info("Initializing FANPhaseOffsetModelZeros ...")
+        logger.info("Initializing FANPhaseOffsetModelZero ...")
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
         # Initialize embedding layer properly

@@ -5,6 +5,8 @@ Configuration utilities for the ML experimentation framework.
 
 import yaml
 import os
+import platform
+import multiprocessing
 # IMPORTANT: Set CUDA environment variables before importing PyTorch and torch
 # This avoids issues with CUDA device initialization on p3dn.24xlarge
 if "CUDA_VISIBLE_DEVICES" not in os.environ:
@@ -109,6 +111,10 @@ def setup_windows_environment(config):
         config: Configuration dictionary
     """
     logger.info("Setting up Windows-specific environment...")
+    
+    # Get performance setting
+    performance_setting = config.get("performance_setting", "fast")
+    performance_mode = performance_setting.lower() == "fast"
     
     # Windows-specific environment variables
     os.environ["PYTHONIOENCODING"] = "utf-8"  # Ensure consistent encoding
