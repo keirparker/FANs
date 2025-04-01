@@ -69,20 +69,44 @@ def create_optimizer(model, config):
 
     # Device-specific optimizers
     if device_type == 'cuda':
-        # For CUDA, use AdamW with higher weight decay
-        if optimizer_type == "adamw" or optimizer_type == "adam":
-            logger.info(f"Using AdamW optimizer with lr={lr} for CUDA")
-            return optim.AdamW(model.parameters(), lr=lr, 
-                              weight_decay=weight_decay if weight_decay > 0 else 1e-4,
-                              eps=1e-8)
-        elif optimizer_type == "sgd":
-            # For SGD on CUDA, use Nesterov acceleration
-            momentum = config["hyperparameters"].get("momentum", 0.9)
-            logger.info(f"Using SGD with Nesterov, momentum={momentum}, lr={lr} for CUDA")
-            return optim.SGD(
-                model.parameters(), lr=lr, momentum=momentum, 
-                weight_decay=weight_decay, nesterov=True
-            )
+        # Check if we're on Windows with a Gigabyte GPU
+        is_windows_gigabyte = False
+        if hasattr(model, 'is_windows_gigabyte'):
+            is_windows_gigabyte = model.is_windows_gigabyte
+        # Try to get the parameter from config directly
+        elif 'device_info' in config and isinstance(config['device_info'], dict):
+            is_windows_gigabyte = config['device_info'].get('is_windows_gigabyte', False)
+        
+        if is_windows_gigabyte:
+            # Special optimizers for Windows Gigabyte GPUs
+            if optimizer_type == "adamw" or optimizer_type == "adam":
+                logger.info(f"Using AdamW optimizer with lr={lr} for Windows Gigabyte GPU")
+                return optim.AdamW(model.parameters(), lr=lr, 
+                                  weight_decay=weight_decay if weight_decay > 0 else 5e-5,
+                                  eps=1e-7)  # Higher eps for Windows stability
+            elif optimizer_type == "sgd":
+                # For SGD on Windows, use safer parameters
+                momentum = config["hyperparameters"].get("momentum", 0.9)
+                logger.info(f"Using SGD with momentum={momentum}, lr={lr} for Windows Gigabyte GPU")
+                return optim.SGD(
+                    model.parameters(), lr=lr, momentum=momentum, 
+                    weight_decay=weight_decay, nesterov=False  # Avoid nesterov on Windows
+                )
+        else:
+            # Standard CUDA optimizers for non-Windows
+            if optimizer_type == "adamw" or optimizer_type == "adam":
+                logger.info(f"Using AdamW optimizer with lr={lr} for CUDA")
+                return optim.AdamW(model.parameters(), lr=lr, 
+                                  weight_decay=weight_decay if weight_decay > 0 else 1e-4,
+                                  eps=1e-8)
+            elif optimizer_type == "sgd":
+                # For SGD on CUDA, use Nesterov acceleration
+                momentum = config["hyperparameters"].get("momentum", 0.9)
+                logger.info(f"Using SGD with Nesterov, momentum={momentum}, lr={lr} for CUDA")
+                return optim.SGD(
+                    model.parameters(), lr=lr, momentum=momentum, 
+                    weight_decay=weight_decay, nesterov=True
+                )
     elif device_type == 'mps':
         # For MPS, stick with Adam for stability
         if optimizer_type == "adam" or optimizer_type == "adamw":
@@ -151,46 +175,77 @@ def create_scheduler(optimizer, config):
     
     # Device-specific scheduler configurations
     if device_type == 'cuda':
-        # For CUDA, use more aggressive learning rate adjustments
-        if scheduler_type == "reduce_on_plateau":
-            # Use more conservative settings if NaN detection is enabled
-            if nan_detection_enabled:
-                patience = config["hyperparameters"].get("scheduler_patience", 10)  # Increase patience
-                factor = config["hyperparameters"].get("scheduler_factor", 0.5)     # Less aggressive reduction
+        # Check if we're on Windows with a Gigabyte GPU
+        is_windows_gigabyte = False
+        # Try to get parameter from config
+        if 'device_info' in config and isinstance(config['device_info'], dict):
+            is_windows_gigabyte = config['device_info'].get('is_windows_gigabyte', False)
+            
+        if is_windows_gigabyte:
+            # Windows Gigabyte GPU-specific schedulers
+            if scheduler_type == "reduce_on_plateau":
+                # Always use more conservative settings for Windows
+                patience = config["hyperparameters"].get("scheduler_patience", 15)  # More patience
+                factor = config["hyperparameters"].get("scheduler_factor", 0.6)     # Less aggressive reduction
                 threshold = 1e-3     # More lenient threshold
-                logger.info(f"Using stable ReduceLROnPlateau for CUDA with patience={patience}, factor={factor} (NaN prevention mode)")
-            else:
-                patience = config["hyperparameters"].get("scheduler_patience", 5)
-                factor = config["hyperparameters"].get("scheduler_factor", 0.2)  # More aggressive reduction
-                threshold = 1e-4     # Standard threshold
-                logger.info(f"Using ReduceLROnPlateau for CUDA with patience={patience}, factor={factor}")
+                logger.info(f"Using stable ReduceLROnPlateau for Windows Gigabyte GPU with patience={patience}, factor={factor}")
                 
-            return optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode="min", factor=float(factor), patience=int(patience), verbose=True, 
-                min_lr=float(min_lr), threshold=float(threshold), cooldown=2  # Added cooldown period
-            )
-        elif scheduler_type == "cosine":
-            # For long training runs, cosine annealing can contribute to NaN issues
-            # due to very small learning rates
-            if nan_detection_enabled:
-                logger.info(f"Using safer OneCycleLR for CUDA (NaN prevention mode)")
-                # Use OneCycleLR which maintains higher LR in the middle of training
-                max_lr = float(optimizer.param_groups[0]['lr']) * 3.0  # Peak at 3x initial LR
-                return optim.lr_scheduler.OneCycleLR(
-                    optimizer, max_lr=max_lr, total_steps=epochs,
-                    pct_start=0.3, final_div_factor=max(1.0/(min_lr / float(optimizer.param_groups[0]['lr'])), 25.0)
+                return optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, mode="min", factor=float(factor), patience=int(patience), verbose=True, 
+                    min_lr=float(min_lr), threshold=float(threshold), cooldown=3  # Longer cooldown for Windows
                 )
-            else:
-                logger.info(f"Using CosineAnnealingWarmRestarts for CUDA with T_0={epochs//3}")
-                # Use warm restarts for CUDA - standard configuration
-                return optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                    optimizer, T_0=int(epochs//3), T_mult=1, eta_min=float(min_lr)
+            elif scheduler_type == "cosine":
+                # For Windows, avoid CosineAnnealingWarmRestarts and use standard CosineAnnealing
+                logger.info(f"Using CosineAnnealingLR for Windows Gigabyte GPU with T_max={epochs}")
+                return optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer, T_max=int(epochs), eta_min=float(min_lr)
                 )
-        elif scheduler_type == "step":
-            step_size = int(config["hyperparameters"].get("scheduler_step_size", 10))
-            factor = float(config["hyperparameters"].get("scheduler_factor", 0.3))
-            logger.info(f"Using StepLR for CUDA with step_size={step_size}, gamma={factor}")
-            return optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=factor)
+            elif scheduler_type == "step":
+                step_size = int(config["hyperparameters"].get("scheduler_step_size", 15))  # Larger step size
+                factor = float(config["hyperparameters"].get("scheduler_factor", 0.5))
+                logger.info(f"Using StepLR for Windows Gigabyte GPU with step_size={step_size}, gamma={factor}")
+                return optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=factor)
+        else:
+            # Standard CUDA scheduler configurations
+            if scheduler_type == "reduce_on_plateau":
+                # Use more conservative settings if NaN detection is enabled
+                if nan_detection_enabled:
+                    patience = config["hyperparameters"].get("scheduler_patience", 10)  # Increase patience
+                    factor = config["hyperparameters"].get("scheduler_factor", 0.5)     # Less aggressive reduction
+                    threshold = 1e-3     # More lenient threshold
+                    logger.info(f"Using stable ReduceLROnPlateau for CUDA with patience={patience}, factor={factor} (NaN prevention mode)")
+                else:
+                    patience = config["hyperparameters"].get("scheduler_patience", 5)
+                    factor = config["hyperparameters"].get("scheduler_factor", 0.2)  # More aggressive reduction
+                    threshold = 1e-4     # Standard threshold
+                    logger.info(f"Using ReduceLROnPlateau for CUDA with patience={patience}, factor={factor}")
+                    
+                return optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, mode="min", factor=float(factor), patience=int(patience), verbose=True, 
+                    min_lr=float(min_lr), threshold=float(threshold), cooldown=2  # Added cooldown period
+                )
+            elif scheduler_type == "cosine":
+                # For long training runs, cosine annealing can contribute to NaN issues
+                # due to very small learning rates
+                if nan_detection_enabled:
+                    logger.info(f"Using safer OneCycleLR for CUDA (NaN prevention mode)")
+                    # Use OneCycleLR which maintains higher LR in the middle of training
+                    max_lr = float(optimizer.param_groups[0]['lr']) * 3.0  # Peak at 3x initial LR
+                    return optim.lr_scheduler.OneCycleLR(
+                        optimizer, max_lr=max_lr, total_steps=epochs,
+                        pct_start=0.3, final_div_factor=max(1.0/(min_lr / float(optimizer.param_groups[0]['lr'])), 25.0)
+                    )
+                else:
+                    logger.info(f"Using CosineAnnealingWarmRestarts for CUDA with T_0={epochs//3}")
+                    # Use warm restarts for CUDA - standard configuration
+                    return optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                        optimizer, T_0=int(epochs//3), T_mult=1, eta_min=float(min_lr)
+                    )
+            elif scheduler_type == "step":
+                step_size = int(config["hyperparameters"].get("scheduler_step_size", 10))
+                factor = float(config["hyperparameters"].get("scheduler_factor", 0.3))
+                logger.info(f"Using StepLR for CUDA with step_size={step_size}, gamma={factor}")
+                return optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=factor)
             
     elif device_type == 'mps':
         # For MPS, use gentler learning rate adjustments for stability
@@ -755,20 +810,64 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
     
     # Device-specific optimizations
     if device and device.type == 'cuda':
-        # CUDA-specific settings
-        logger.info("Using CUDA-optimized parameters")
-        # Larger batch size for CUDA
-        if "batch_size" not in config["hyperparameters"]:
-            config["hyperparameters"]["batch_size"] = 128
-        # More workers for CUDA (1 per GPU + 2)
-        config["hyperparameters"]["num_workers"] = min(torch.cuda.device_count() * 2 + 2, 8)
-        # Higher learning rate for CUDA
-        if "lr" not in config["hyperparameters"]:
-            config["hyperparameters"]["lr"] = 1e-3
-        # Clip at 5.0 for stability but allow larger gradients
-        config["hyperparameters"]["clip_value"] = 5.0
-        # Enable AMP for faster training
-        config["hyperparameters"]["use_amp"] = True
+        # Check if we're on Windows with a Gigabyte GPU
+        is_windows_gigabyte = (device_info and device_info.get('is_windows_gigabyte', False))
+        
+        if is_windows_gigabyte:
+            # Windows Gigabyte GPU-specific settings
+            logger.info("Using Windows Gigabyte GPU-optimized parameters")
+            
+            # Use specific batch size for Windows Gigabyte GPUs
+            if "windows_batch_size" in config["hyperparameters"]:
+                config["hyperparameters"]["batch_size"] = config["hyperparameters"]["windows_batch_size"]
+            elif "batch_size" not in config["hyperparameters"]:
+                # Default batch size for Gigabyte GPUs is a bit smaller for stability
+                config["hyperparameters"]["batch_size"] = 64
+            
+            # Windows typically needs fewer workers due to different thread handling
+            config["hyperparameters"]["num_workers"] = min(4, os.cpu_count() or 4)
+            
+            # Use slightly more conservative learning rate for Windows
+            if "lr" not in config["hyperparameters"]:
+                config["hyperparameters"]["lr"] = 5e-4
+            
+            # More conservative gradient clipping for stability on Windows
+            config["hyperparameters"]["clip_value"] = 1.0
+            
+            # Enable AMP for compatible Gigabyte GPUs
+            config["hyperparameters"]["use_amp"] = True
+            
+            # Windows-specific gradient accumulation (helps with memory pressure)
+            if "gradient_accumulation_steps" not in config["hyperparameters"]:
+                config["hyperparameters"]["gradient_accumulation_steps"] = 2
+            
+            # Check VRAM size to adjust more settings
+            gigabyte_gpu_info = device_info.get('gigabyte_gpu_info', {})
+            vram_mb = gigabyte_gpu_info.get('vram', 0)
+            
+            if vram_mb and vram_mb < 8000:  # Less than 8GB VRAM
+                # Further reduce batch size for limited VRAM
+                current_batch = config["hyperparameters"]["batch_size"]
+                config["hyperparameters"]["batch_size"] = min(current_batch, 32)
+                logger.info(f"Adjusting batch size to {config['hyperparameters']['batch_size']} for limited VRAM ({vram_mb}MB)")
+                
+                # Increase gradient accumulation to compensate
+                config["hyperparameters"]["gradient_accumulation_steps"] = 4
+        else:
+            # Standard CUDA-specific settings (non-Windows)
+            logger.info("Using CUDA-optimized parameters")
+            # Larger batch size for CUDA
+            if "batch_size" not in config["hyperparameters"]:
+                config["hyperparameters"]["batch_size"] = 128
+            # More workers for CUDA (1 per GPU + 2)
+            config["hyperparameters"]["num_workers"] = min(torch.cuda.device_count() * 2 + 2, 8)
+            # Higher learning rate for CUDA
+            if "lr" not in config["hyperparameters"]:
+                config["hyperparameters"]["lr"] = 1e-3
+            # Clip at 5.0 for stability but allow larger gradients
+            config["hyperparameters"]["clip_value"] = 5.0
+            # Enable AMP for faster training
+            config["hyperparameters"]["use_amp"] = True
         
     elif device and device.type == 'mps':
         # MPS-specific settings (Apple Silicon)

@@ -5,6 +5,7 @@ Provides comprehensive support for different hardware platforms:
 - Apple Silicon (M1/M2/M3) with MPS acceleration
 - NVIDIA GPUs with CUDA
 - AWS EC2 instances (specifically p3dn.24xlarge with 8x Tesla V100)
+- Windows machines with Gigabyte GPUs
 - CPU fallback
 """
 
@@ -77,6 +78,77 @@ def detect_aws_instance_type():
     return None
 
 
+def detect_windows_gigabyte_gpu():
+    """
+    Detect if running on a Windows system with Gigabyte GPU.
+    
+    Returns:
+        bool: True if running on Windows with Gigabyte GPU, False otherwise
+        dict: Information about the detected Gigabyte GPU
+    """
+    is_windows_gigabyte = False
+    gigabyte_info = {
+        'model': None,
+        'vram': None,
+        'driver_version': None,
+        'optimized': False
+    }
+    
+    # Check if running on Windows
+    if platform.system() == 'Windows':
+        # First check if CUDA is available at all
+        if torch.cuda.is_available():
+            try:
+                # Try to get nvidia-smi output
+                nvidia_smi = subprocess.check_output(['nvidia-smi', '-q'], stderr=subprocess.DEVNULL).decode('utf-8')
+                
+                # Check GPU vendor information
+                # Gigabyte GPUs will show the model name in nvidia-smi output
+                if 'GIGABYTE' in nvidia_smi.upper() or 'AORUS' in nvidia_smi.upper():
+                    is_windows_gigabyte = True
+                    logger.info("Detected Gigabyte GPU on Windows")
+                    
+                    # Extract GPU model
+                    model_match = re.search(r'Product Name\s+:\s+(.*)', nvidia_smi)
+                    if model_match:
+                        gigabyte_info['model'] = model_match.group(1).strip()
+                        logger.info(f"Gigabyte GPU model: {gigabyte_info['model']}")
+                    
+                    # Extract VRAM size
+                    vram_match = re.search(r'FB Memory Usage\s+.*?Total\s+:\s+(\d+)\s+MiB', nvidia_smi, re.DOTALL)
+                    if vram_match:
+                        vram_mb = int(vram_match.group(1))
+                        gigabyte_info['vram'] = vram_mb
+                        logger.info(f"Gigabyte GPU VRAM: {vram_mb} MB")
+                    
+                    # Extract driver version
+                    driver_match = re.search(r'Driver Version\s+:\s+([\d\.]+)', nvidia_smi)
+                    if driver_match:
+                        gigabyte_info['driver_version'] = driver_match.group(1)
+                        logger.info(f"NVIDIA driver version: {gigabyte_info['driver_version']}")
+                
+                # Alternative method: get GPU name directly from PyTorch
+                if not is_windows_gigabyte and torch.cuda.device_count() > 0:
+                    gpu_name = torch.cuda.get_device_name(0).upper()
+                    if 'GIGABYTE' in gpu_name or 'AORUS' in gpu_name:
+                        is_windows_gigabyte = True
+                        gigabyte_info['model'] = torch.cuda.get_device_name(0)
+                        logger.info(f"Detected Gigabyte GPU via PyTorch: {gigabyte_info['model']}")
+                        
+                        # Try to get memory info
+                        try:
+                            free_mem, total_mem = torch.cuda.mem_get_info(0)
+                            gigabyte_info['vram'] = int(total_mem / (1024 * 1024))  # Convert to MB
+                            logger.info(f"Gigabyte GPU VRAM: {gigabyte_info['vram']} MB")
+                        except:
+                            # Older PyTorch versions might not have mem_get_info
+                            pass
+            except Exception as e:
+                logger.warning(f"Error detecting Gigabyte GPU: {e}")
+    
+    return is_windows_gigabyte, gigabyte_info
+
+
 def detect_apple_silicon():
     """
     Detect if running on Apple Silicon (M1/M2/M3) hardware.
@@ -141,6 +213,9 @@ def detect_gpu_capabilities():
         'total_gpu_memory': 0,
         'is_aws': False,
         'aws_instance_type': None,
+        'is_windows': platform.system() == 'Windows',
+        'is_windows_gigabyte': False,
+        'gigabyte_gpu_info': None,
     }
     
     # Check if we're on Apple Silicon
@@ -151,6 +226,12 @@ def detect_gpu_capabilities():
     if aws_instance:
         gpu_info['is_aws'] = True
         gpu_info['aws_instance_type'] = aws_instance
+        
+    # Check if we're on Windows with a Gigabyte GPU
+    if gpu_info['is_windows']:
+        is_windows_gigabyte, gigabyte_gpu_info = detect_windows_gigabyte_gpu()
+        gpu_info['is_windows_gigabyte'] = is_windows_gigabyte
+        gpu_info['gigabyte_gpu_info'] = gigabyte_gpu_info
     
     # Gather CUDA device information if available
     if gpu_info['cuda_available']:
@@ -303,6 +384,44 @@ def setup_aws_p3dn_environment(conservative=True):
     logger.info("Configured environment variables for AWS p3dn.24xlarge")
 
 
+def setup_windows_gigabyte_environment(gigabyte_info):
+    """
+    Configure environment variables for optimal performance on Windows with Gigabyte GPUs.
+    
+    Args:
+        gigabyte_info: Dictionary with Gigabyte GPU information
+    """
+    # CUDA optimizations for Windows
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # Match IDs with nvidia-smi
+    os.environ["CUDA_CACHE_DISABLE"] = "0"  # Enable JIT cache
+    
+    # Windows-specific thread optimizations
+    num_cpu_cores = os.cpu_count() or 4
+    os.environ["OMP_NUM_THREADS"] = str(min(num_cpu_cores, 8))  # Limit OpenMP threads to avoid oversubscription
+    os.environ["MKL_NUM_THREADS"] = str(min(num_cpu_cores, 8))  # Limit MKL threads similarly
+    
+    # Memory optimizations for Gigabyte GPUs
+    # Allocate a larger portion of GPU memory upfront for better performance
+    if gigabyte_info and gigabyte_info.get('vram'):
+        vram_mb = gigabyte_info.get('vram')
+        if vram_mb:
+            # Set optimized parameters based on available VRAM
+            if vram_mb >= 8000:  # 8GB or more
+                # Higher memory budget for larger VRAM GPUs
+                os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:1024"
+            else:
+                # More conservative for smaller VRAM GPUs
+                os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+    
+    # CUDNN optimizations
+    os.environ["CUDNN_LOGINFO_DBG"] = "0"  # Disable verbose logging
+    os.environ["CUDNN_LOGDEST_DBG"] = "stdout"  # Log to stdout for better diagnostics if needed
+    
+    # Windows-specific optimizations
+    logger.info("Configured environment variables for Windows with Gigabyte GPU")
+    gigabyte_info['optimized'] = True
+
+
 def setup_apple_silicon_environment():
     """
     Configure environment variables for optimal performance on Apple Silicon (M1/M2/M3) hardware.
@@ -359,6 +478,16 @@ def select_device(config):
     
     if gpu_info['is_aws']:
         logger.info(f"  AWS EC2 instance: {gpu_info['aws_instance_type']}")
+        
+    if gpu_info['is_windows']:
+        logger.info(f"  Windows: {platform.release()}")
+        if gpu_info['is_windows_gigabyte']:
+            gigabyte_info = gpu_info['gigabyte_gpu_info']
+            logger.info(f"  Windows Gigabyte GPU: {gigabyte_info.get('model', 'Unknown model')}")
+            if gigabyte_info.get('vram'):
+                logger.info(f"  GPU VRAM: {gigabyte_info.get('vram')} MB")
+            if gigabyte_info.get('driver_version'):
+                logger.info(f"  NVIDIA driver: {gigabyte_info.get('driver_version')}")
     
     # Platform-specific optimizations - set up environment for specific platforms
     if gpu_info['is_aws'] and gpu_info['aws_instance_type'] == 'p3dn.24xlarge':
@@ -381,6 +510,18 @@ def select_device(config):
         # If we're on this specific instance type, always use CUDA
         device_str = "cuda"
         force_cuda = aws_p3dn_optimization  # Only force if optimization is enabled
+        
+    elif gpu_info['is_windows_gigabyte']:
+        # Configure for Windows with Gigabyte GPUs
+        logger.info(f"Optimizing for Windows with Gigabyte GPU: {gpu_info['gigabyte_gpu_info'].get('model', 'Unknown model')}")
+        setup_windows_gigabyte_environment(gpu_info['gigabyte_gpu_info'])
+        
+        # Check if Windows Gigabyte optimization is explicitly enabled in config
+        windows_gigabyte_optimization = config.get("hyperparameters", {}).get("windows_gigabyte_optimization", True)
+        
+        # Always use CUDA for Windows Gigabyte GPUs
+        device_str = "cuda"
+        force_cuda = windows_gigabyte_optimization
         
     elif gpu_info['apple_silicon']:
         # Configure for Apple Silicon
@@ -460,10 +601,13 @@ def select_device(config):
         'is_multi_gpu': False,
         'gpu_count': 0,
         'platform': platform.system(),
-        'platform_specific': gpu_info['apple_silicon'] or gpu_info['is_aws'],
+        'platform_specific': gpu_info['apple_silicon'] or gpu_info['is_aws'] or gpu_info['is_windows_gigabyte'],
         'aws_instance': gpu_info['aws_instance_type'] if gpu_info['is_aws'] else None,
         'apple_silicon': gpu_info['apple_silicon'],
         'chip_model': gpu_info['chip_model'],
+        'is_windows': gpu_info['is_windows'],
+        'is_windows_gigabyte': gpu_info['is_windows_gigabyte'],
+        'gigabyte_gpu_info': gpu_info['gigabyte_gpu_info'] if gpu_info['is_windows_gigabyte'] else None,
     }
     
     # Final device selection logic with precedence order

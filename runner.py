@@ -117,6 +117,24 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                     mlflow.log_param("apple_silicon", True)
                     if device_info.get('chip_model'):
                         mlflow.log_param("chip_model", device_info['chip_model'])
+                        
+                # Log Windows and Gigabyte GPU information if available
+                if device_info.get('is_windows', False):
+                    mlflow.log_param("windows", True)
+                    mlflow.log_param("windows_version", platform.release())
+                    
+                    if device_info.get('is_windows_gigabyte', False):
+                        mlflow.log_param("windows_gigabyte_gpu", True)
+                        
+                        # Log Gigabyte-specific GPU details if available
+                        gigabyte_info = device_info.get('gigabyte_gpu_info', {})
+                        if gigabyte_info:
+                            if gigabyte_info.get('model'):
+                                mlflow.log_param("gigabyte_gpu_model", gigabyte_info.get('model'))
+                            if gigabyte_info.get('vram'):
+                                mlflow.log_param("gigabyte_gpu_vram", f"{gigabyte_info.get('vram')} MB")
+                            if gigabyte_info.get('driver_version'):
+                                mlflow.log_param("nvidia_driver", gigabyte_info.get('driver_version'))
 
                 # 1. Generate the base dataset + retrieve underlying function
                 logger.info(f"Generating {dataset_type} dataset...")

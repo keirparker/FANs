@@ -64,6 +64,11 @@ hyperparameters:
   # AWS p3dn.24xlarge specific configuration
   aws_p3dn_optimization: true     # Automatically optimize for AWS p3dn.24xlarge with 8x Tesla V100
   aws_max_gpus: 8                 # Maximum number of GPUs to use on AWS
+  
+  # Windows with Gigabyte GPU specific configuration
+  windows_gigabyte_optimization: true  # Automatically optimize for Windows with Gigabyte GPUs
+  windows_batch_size: 64              # Batch size optimized for Gigabyte GPUs
+  windows_memory_optimization: true   # Apply memory optimizations for Gigabyte GPUs
 
 logging:
   level: "INFO"  # Could be DEBUG, INFO, WARNING, ERROR, etc.

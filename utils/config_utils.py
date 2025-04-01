@@ -74,6 +74,13 @@ def setup_environment(config):
     # Configure logger
     setup_logging(config)
     
+    # Detect platform
+    system_platform = platform.system()
+    if system_platform == 'Windows':
+        logger.info(f"Detected Windows platform: {platform.release()}")
+        # Windows-specific setup
+        setup_windows_environment(config)
+    
     # Safe CUDA initialization before any multi-GPU setup
     # This helps avoid device errors on multi-GPU systems
     if torch.cuda.is_available():
@@ -92,6 +99,57 @@ def setup_environment(config):
     # Default to 'fast' for p3.8x EC2 instances with Tesla V100 GPUs
     performance_setting = config.get("performance_setting", "fast")
     performance_mode = performance_setting.lower() == "fast"
+
+
+def setup_windows_environment(config):
+    """
+    Configure specific settings for Windows environments
+    
+    Args:
+        config: Configuration dictionary
+    """
+    logger.info("Setting up Windows-specific environment...")
+    
+    # Windows-specific environment variables
+    os.environ["PYTHONIOENCODING"] = "utf-8"  # Ensure consistent encoding
+    
+    # Adjust thread count for Windows (which handles threads differently than Unix)
+    if os.cpu_count():
+        suggested_threads = min(os.cpu_count(), 8)  # Limit to avoid oversubscription
+        os.environ["OMP_NUM_THREADS"] = str(suggested_threads)
+        os.environ["MKL_NUM_THREADS"] = str(suggested_threads)
+        logger.info(f"Set Windows thread count to {suggested_threads}")
+    
+    # Set CUDA environment variables for Windows
+    if torch.cuda.is_available():
+        # CUDA path handling for Windows
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        os.environ["CUDA_CACHE_DISABLE"] = "0"
+        
+        # Check if it might be a Gigabyte GPU by checking GPU name
+        if torch.cuda.device_count() > 0:
+            try:
+                gpu_name = torch.cuda.get_device_name(0).upper()
+                # Mark in config that we've detected Windows-specific setup
+                if 'GIGABYTE' in gpu_name or 'AORUS' in gpu_name:
+                    logger.info(f"Detected possible Gigabyte GPU on Windows: {gpu_name}")
+                    # Store device info in config for later use
+                    if "device_info" not in config:
+                        config["device_info"] = {}
+                    config["device_info"]["platform"] = "Windows"
+                    config["device_info"]["is_windows"] = True
+                    config["device_info"]["is_windows_gigabyte"] = True
+                    
+                    # Apply Gigabyte GPU specific settings from config
+                    if config.get("hyperparameters", {}).get("windows_memory_optimization", True):
+                        # Enable JIT fusion optimization for Windows
+                        torch._C._jit_set_profiling_executor(True)
+                        torch._C._jit_set_profiling_mode(True)
+                        logger.info("Enabled PyTorch JIT optimizations for Windows Gigabyte GPU")
+            except Exception as e:
+                logger.warning(f"Error detecting GPU information on Windows: {e}")
+    
+    logger.info("Windows environment setup complete")
 
     # Set random seeds for reproducibility
     if "random_seed" in config:
