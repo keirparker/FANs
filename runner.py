@@ -14,6 +14,7 @@ import time
 from datetime import datetime
 import json
 import numpy as np
+import platform
 
 from utils.config_utils import load_config, setup_environment
 from utils.device_utils import select_device
