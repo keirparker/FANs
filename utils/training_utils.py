@@ -13,6 +13,41 @@ from loguru import logger
 import random
 
 
+def apply_environment_overrides(config):
+    """
+    Apply environment variable overrides from run_ec2.py to the config dictionary
+    
+    Args:
+        config: Configuration dictionary to update
+    """
+    # Check for learning rate override
+    if "OVERRIDE_LEARNING_RATE" in os.environ:
+        try:
+            override_lr = float(os.environ["OVERRIDE_LEARNING_RATE"])
+            config["hyperparameters"]["lr"] = override_lr
+            logger.info(f"Overriding learning rate with value from environment: {override_lr}")
+        except Exception as e:
+            logger.warning(f"Failed to override learning rate: {e}")
+    
+    # Check for gradient clip value override
+    if "OVERRIDE_CLIP_VALUE" in os.environ:
+        try:
+            override_clip = float(os.environ["OVERRIDE_CLIP_VALUE"])
+            config["hyperparameters"]["clip_value"] = override_clip
+            logger.info(f"Overriding gradient clip value with value from environment: {override_clip}")
+        except Exception as e:
+            logger.warning(f"Failed to override clip value: {e}")
+    
+    # Check for gradient accumulation steps override
+    if "GRADIENT_ACCUMULATION_STEPS" in os.environ:
+        try:
+            override_accum = int(os.environ["GRADIENT_ACCUMULATION_STEPS"])
+            config["hyperparameters"]["gradient_accumulation_steps"] = override_accum
+            logger.info(f"Overriding gradient accumulation steps with value from environment: {override_accum}")
+        except Exception as e:
+            logger.warning(f"Failed to override gradient accumulation steps: {e}")
+
+
 def create_optimizer(model, config):
     """
     Create optimizer based on configuration.
@@ -101,7 +136,8 @@ def create_scheduler(optimizer, config):
     logger.info(f"Setting minimum learning rate floor to {min_lr}")
 
     # If NaN detection is enabled, use more conservative schedulers
-    nan_detection_enabled = os.environ.get("NAN_DETECTION", "0") == "1"
+    nan_detection_env = os.environ.get("NAN_DETECTION", "0")
+    nan_detection_enabled = nan_detection_env == "1"
         
     # Get device type from optimizer to customize scheduler
     device_type = 'cpu'
@@ -473,33 +509,17 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
     Returns:
         dict: Training history (losses, metrics, etc.)
     """
-    # Check for environment variable overrides from run_ec2.py
-    if "OVERRIDE_LEARNING_RATE" in os.environ:
-        try:
-            override_lr = float(os.environ["OVERRIDE_LEARNING_RATE"])
-            config["hyperparameters"]["lr"] = override_lr
-            logger.info(f"Overriding learning rate with value from environment: {override_lr}")
-        except:
-            pass
-            
-    if "OVERRIDE_CLIP_VALUE" in os.environ:
-        try:
-            override_clip = float(os.environ["OVERRIDE_CLIP_VALUE"])
-            config["hyperparameters"]["clip_value"] = override_clip
-            logger.info(f"Overriding gradient clip value with value from environment: {override_clip}")
-        except:
-            pass
-            
-    if "GRADIENT_ACCUMULATION_STEPS" in os.environ:
-        try:
-            override_accum = int(os.environ["GRADIENT_ACCUMULATION_STEPS"])
-            config["hyperparameters"]["gradient_accumulation_steps"] = override_accum
-            logger.info(f"Overriding gradient accumulation steps with value from environment: {override_accum}")
-        except:
-            pass
+    # Import os at the top of the function to avoid shadowing issues
+    import os
+    
+    # Apply environment variable overrides
+    apply_environment_overrides(config)
             
     # Enable advanced NaN detection if set in environment or config
-    nan_detection_enabled = (os.environ.get("NAN_DETECTION", "0") == "1" or 
+    # Get NaN detection setting from environment, defaulting to "0"
+    nan_detection_env = os.environ.get("NAN_DETECTION", "0")
+    # Parse environment variable or use config setting
+    nan_detection_enabled = (nan_detection_env == "1" or 
                            config["hyperparameters"].get("nan_detection", False))
     if nan_detection_enabled:
         logger.info("Advanced NaN detection and correction enabled")
@@ -1146,14 +1166,10 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                 f"R²: {metrics['r2']:.4f}, RMSE: {metrics['rmse']:.4f}"
             )
             
-            # Save checkpoints periodically and on best validation loss
-            if nan_detection_enabled and epoch > 0:
-                # Create checkpoints directory if it doesn't exist
-                checkpoint_dir = os.path.join("models", "checkpoints")
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                
-                # Determine if this is the best model so far - use a regular variable
-                # since history is a dict not an object
+            # Save model only if explicitly enabled in config
+            save_model_enabled = config["hyperparameters"].get("save_model", False)
+            if save_model_enabled and epoch > 0:
+                # Determine if this is the best model so far
                 if 'best_val_loss' not in locals():
                     best_val_loss = float('inf')
                     
@@ -1161,35 +1177,25 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                 if is_best:
                     best_val_loss = val_loss
                     
-                # Get checkpoint frequency from config
-                checkpoint_frequency = config["hyperparameters"].get("checkpoint_frequency", 25)
-                
-                # Save checkpoint at specified frequency and for best model
-                if is_best or epoch % checkpoint_frequency == 0:
+                    # Only save the best model (no periodic checkpoints)
                     try:
-                        # Create checkpoint with all necessary info to resume training
+                        # Create checkpoints directory if it doesn't exist
+                        checkpoint_dir = os.path.join("models", "checkpoints")
+                        os.makedirs(checkpoint_dir, exist_ok=True)
+                        
+                        # Only include essential data to reduce file size
                         checkpoint = {
                             'epoch': epoch,
                             'model_state_dict': model.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                            'scheduler_state_dict': scheduler.state_dict() if scheduler and not isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau) else None,
                             'val_loss': val_loss,
-                            'train_loss': epoch_loss,
-                            'history': history,
-                            'config': {k: v for k, v in config.items() if isinstance(v, (int, float, str, bool, list, dict))}
                         }
                         
-                        # Generate filename based on epoch and loss
-                        if is_best:
-                            checkpoint_path = os.path.join(checkpoint_dir, f"best_model.pt")
-                            logger.info(f"Saving best model checkpoint (val_loss={val_loss:.6f})")
-                        else:
-                            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch}.pt")
-                            logger.info(f"Saving periodic checkpoint at epoch {epoch}")
-                            
+                        # Only save best model
+                        checkpoint_path = os.path.join(checkpoint_dir, f"best_model.pt")
+                        logger.info(f"Saving best model checkpoint (val_loss={val_loss:.6f})")
                         torch.save(checkpoint, checkpoint_path)
                     except Exception as e:
-                        logger.warning(f"Failed to save checkpoint: {e}")
+                        logger.warning(f"Failed to save model: {e}")
 
             # Scheduler step for ReduceLROnPlateau
             if scheduler is not None and isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):

@@ -1,13 +1,13 @@
-experiment_name: "new graphs"
+experiment_name: "simple run"
 
 models_to_run:
-#  - MLP
+  - MLP
   - FAN
   - FANGated
   - FANPhaseOffsetModel
   - FANPhaseOffsetModelGated
-  - FANAmplitudePhaseModel
-  - FANUnconstrainedBasisModel
+#  - FANAmplitudePhaseModel
+#  - FANUnconstrainedBasisModel
 
 datasets_to_run:
   - sin
@@ -15,10 +15,10 @@ datasets_to_run:
   - complex_1
   - complex_2
   - complex_3
-  - complex_4
-  - combined_freq_amp_modulation
-  - gradually_increasing_amplitude
-  - gradually_increasing_frequency
+#  - complex_4
+#  - combined_freq_amp_modulation
+#  - gradually_increasing_amplitude
+#  - gradually_increasing_frequency
 
 
 data_versions:
@@ -28,18 +28,18 @@ data_versions:
 
 hyperparameters:
   # Hardware-adaptive hyperparameters (works for both CUDA and MPS)
-  early_stopping: False
+  early_stopping: True
   early_stopping_patience: 300
-  early_stopping_min_delta: 0.000001
-  num_samples: 50000
-  test_samples: 10000
+  early_stopping_min_delta: 0.00001
+  num_samples: 20000
+  test_samples: 4000
   noise_level: 0.15
   sparsity_factor: 0.5
-  epochs: 300             # Increased epochs for longer training
-  lr: 0.00005             # Lower initial learning rate for more stable training 
+  epochs: 10000             # Increased epochs for longer training
+  lr: 0.0001             # Lower initial learning rate for more stable training
   min_lr: 1e-7            # Minimum learning rate to prevent tiny gradient issues
   weight_decay: 0.00001   # L2 regularization for better generalization (as float)
-  batch_size: 256         # Larger batch size for better hardware utilization
+  batch_size: 128         # Larger batch size for better hardware utilization
   num_workers: 4          # Use multiple CPU workers for data loading
   use_amp: true           # Automatic mixed precision (better for Tesla V100)
   optimizer: "adamw"      # Use AdamW optimizer for better performance
@@ -57,9 +57,9 @@ hyperparameters:
   scheduler_patience: 10           # Increased patience for more stable LR reduction
   scheduler_factor: 0.5            # Less aggressive LR reduction factor
   
-  # Checkpoint and resuming options
-  resume_training: true            # Enable to automatically resume from latest checkpoint
-  checkpoint_frequency: 25         # Save checkpoint every N epochs
+  # Model saving options
+  resume_training: False            # Enable to automatically resume from latest checkpoint
+  save_model: False                # Whether to save models at all (off by default to save disk space)
   
   # AWS p3dn.24xlarge specific configuration
   aws_p3dn_optimization: true     # Automatically optimize for AWS p3dn.24xlarge with 8x Tesla V100

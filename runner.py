@@ -42,7 +42,9 @@ def setup_logger():
     logger.remove()
     logger.add(
         f"{log_dir}/experiments_{time.strftime('%Y%m%d-%H%M%S')}.log",
-        rotation="500 MB",
+        rotation="50 MB",  # Smaller log file size
+        retention="5 days",  # Only keep logs for 5 days
+        compression="zip",  # Compress log files
         level="INFO",
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
     )
@@ -522,6 +524,38 @@ def main():
     """
     # Setup logging
     setup_logger()
+
+    # Clean up disk space before starting
+    mlflow_dir = os.path.abspath(os.path.join(os.getcwd(), "mlruns"))
+    if os.path.exists(mlflow_dir):
+        try:
+            experiment_dirs = [d for d in os.listdir(mlflow_dir) 
+                              if d.isdigit() or (d.replace("-", "").isdigit() and d != "0")]
+            if len(experiment_dirs) > 3:
+                # Sort by creation time (oldest first)
+                experiment_dirs.sort(key=lambda x: os.path.getmtime(os.path.join(mlflow_dir, x)))
+                # Remove all but the 3 newest experiment directories
+                for old_dir in experiment_dirs[:-3]:
+                    old_path = os.path.join(mlflow_dir, old_dir)
+                    logger.info(f"Cleaning up old MLflow data: {old_path}")
+                    import shutil
+                    shutil.rmtree(old_path, ignore_errors=True)
+        except Exception as e:
+            logger.warning(f"Error cleaning up MLflow directories: {e}")
+    
+    # Also clean old log files
+    log_dir = "logs"
+    if os.path.exists(log_dir):
+        try:
+            log_files = [f for f in os.listdir(log_dir) if f.endswith(".log") and not f.endswith(".zip")]
+            if len(log_files) > 10:  # Keep only 10 most recent uncompressed log files
+                log_files.sort(key=lambda x: os.path.getmtime(os.path.join(log_dir, x)))
+                for old_log in log_files[:-10]:
+                    old_log_path = os.path.join(log_dir, old_log)
+                    logger.info(f"Removing old log file: {old_log_path}")
+                    os.remove(old_log_path)
+        except Exception as e:
+            logger.warning(f"Error cleaning up log files: {e}")
 
     # Log script start
     logger.info(
