@@ -103,23 +103,24 @@ def detect_windows_gigabyte_gpu():
                 nvidia_smi = subprocess.check_output(['nvidia-smi', '-q'], stderr=subprocess.DEVNULL).decode('utf-8')
                 
                 # Check GPU vendor information
-                # Gigabyte GPUs will show the model name in nvidia-smi output
-                if 'GIGABYTE' in nvidia_smi.upper() or 'AORUS' in nvidia_smi.upper():
-                    is_windows_gigabyte = True
-                    logger.info("Detected Gigabyte GPU on Windows")
+                # Support for GeForce GTX 1660 and other NVIDIA GPUs
+                is_nvidia_gpu = any(brand in nvidia_smi.upper() for brand in ['NVIDIA', 'GEFORCE', 'GTX', 'RTX'])
+                if is_nvidia_gpu:
+                    is_windows_gigabyte = True  # Use this flag for all NVIDIA GPUs
+                    logger.info("Detected NVIDIA GPU on Windows")
                     
                     # Extract GPU model
                     model_match = re.search(r'Product Name\s+:\s+(.*)', nvidia_smi)
                     if model_match:
                         gigabyte_info['model'] = model_match.group(1).strip()
-                        logger.info(f"Gigabyte GPU model: {gigabyte_info['model']}")
+                        logger.info(f"NVIDIA GPU model: {gigabyte_info['model']}")
                     
                     # Extract VRAM size
                     vram_match = re.search(r'FB Memory Usage\s+.*?Total\s+:\s+(\d+)\s+MiB', nvidia_smi, re.DOTALL)
                     if vram_match:
                         vram_mb = int(vram_match.group(1))
                         gigabyte_info['vram'] = vram_mb
-                        logger.info(f"Gigabyte GPU VRAM: {vram_mb} MB")
+                        logger.info(f"NVIDIA GPU VRAM: {vram_mb} MB")
                     
                     # Extract driver version
                     driver_match = re.search(r'Driver Version\s+:\s+([\d\.]+)', nvidia_smi)
@@ -130,16 +131,17 @@ def detect_windows_gigabyte_gpu():
                 # Alternative method: get GPU name directly from PyTorch
                 if not is_windows_gigabyte and torch.cuda.device_count() > 0:
                     gpu_name = torch.cuda.get_device_name(0).upper()
-                    if 'GIGABYTE' in gpu_name or 'AORUS' in gpu_name:
+                    is_nvidia_gpu = any(brand in gpu_name for brand in ['NVIDIA', 'GEFORCE', 'GTX', 'RTX'])
+                    if is_nvidia_gpu or 'GIGABYTE' in gpu_name or 'AORUS' in gpu_name:
                         is_windows_gigabyte = True
                         gigabyte_info['model'] = torch.cuda.get_device_name(0)
-                        logger.info(f"Detected Gigabyte GPU via PyTorch: {gigabyte_info['model']}")
+                        logger.info(f"Detected GPU via PyTorch: {gigabyte_info['model']}")
                         
                         # Try to get memory info
                         try:
                             free_mem, total_mem = torch.cuda.mem_get_info(0)
                             gigabyte_info['vram'] = int(total_mem / (1024 * 1024))  # Convert to MB
-                            logger.info(f"Gigabyte GPU VRAM: {gigabyte_info['vram']} MB")
+                            logger.info(f"GPU VRAM: {gigabyte_info['vram']} MB")
                         except:
                             # Older PyTorch versions might not have mem_get_info
                             pass

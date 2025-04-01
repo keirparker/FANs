@@ -27,7 +27,7 @@ data_versions:
 #  - sparse
 
 hyperparameters:
-  # Hardware-adaptive hyperparameters (works for both CUDA and MPS)
+  # Hardware-adaptive hyperparameters optimized for NVIDIA GeForce GTX 1660
   early_stopping: True
   early_stopping_patience: 300
   early_stopping_min_delta: 0.00001
@@ -39,18 +39,19 @@ hyperparameters:
   lr: 0.0001             # Lower initial learning rate for more stable training
   min_lr: 1e-7            # Minimum learning rate to prevent tiny gradient issues
   weight_decay: 0.00001   # L2 regularization for better generalization (as float)
-  batch_size: 128         # Larger batch size for better hardware utilization
-  num_workers: 4          # Use multiple CPU workers for data loading
-  use_amp: true           # Automatic mixed precision (better for Tesla V100)
+  batch_size: 64          # Reduced batch size for GTX 1660 (6GB VRAM)
+  num_workers: 2          # Reduced workers to avoid overloading the system
+  use_amp: true           # Automatic mixed precision for better performance
   optimizer: "adamw"      # Use AdamW optimizer for better performance
   use_scheduler: true     # Enable learning rate scheduling
   scheduler_type: "cosine" # Cosine annealing scheduler
   drop_last: true         # Drop last batch for more consistent batch sizes
   clip_value: 0.5         # Value for gradient clipping to prevent NaN issues
   clip_gradients: true    # Always clip gradients to prevent explosions
-  multigpu: true          # Enable multi-GPU training
-  gradient_accumulation_steps: 4   # Increased gradient accumulation for stability
-  distributed_training: auto       # 'auto' (detect), true, false (use DataParallel)
+  multigpu: false         # Disable multi-GPU for single GPU setup
+  gradient_accumulation_steps: 2   # Reduced for single GPU
+  distributed_training: false      # Disable distributed training for single GPU
+  device: "cuda"          # Explicitly set to use CUDA
   
   # NaN loss prevention settings
   nan_detection: true              # Enable advanced NaN detection and handling
@@ -61,14 +62,14 @@ hyperparameters:
   resume_training: False            # Enable to automatically resume from latest checkpoint
   save_model: False                # Whether to save models at all (off by default to save disk space)
   
-  # AWS p3dn.24xlarge specific configuration
-  aws_p3dn_optimization: true     # Automatically optimize for AWS p3dn.24xlarge with 8x Tesla V100
-  aws_max_gpus: 8                 # Maximum number of GPUs to use on AWS
+  # AWS p3dn.24xlarge specific configuration - disabled for GTX 1660
+  aws_p3dn_optimization: false     # Disable AWS optimizations
+  aws_max_gpus: 1                  # Single GPU
   
-  # Windows with Gigabyte GPU specific configuration
-  windows_gigabyte_optimization: true  # Automatically optimize for Windows with Gigabyte GPUs
-  windows_batch_size: 64              # Batch size optimized for Gigabyte GPUs
-  windows_memory_optimization: true   # Apply memory optimizations for Gigabyte GPUs
+  # Windows with GPU specific configuration
+  windows_gigabyte_optimization: true  # Enable GPU optimizations
+  windows_batch_size: 64              # Batch size optimized for GTX 1660
+  windows_memory_optimization: true   # Apply memory optimizations
 
 logging:
   level: "INFO"  # Could be DEBUG, INFO, WARNING, ERROR, etc.

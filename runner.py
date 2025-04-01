@@ -537,12 +537,76 @@ def save_run_ids(run_ids, experiment_name, run_number=None):
 
     logger.info(f"Saved {len(run_ids)} run IDs to {filename}")
 
+def test_gpu_functionality():
+    """
+    Run a quick test to verify if the GPU is properly detected and functioning.
+    """
+    logger.info("=== GPU/CUDA DETECTION TEST ===")
+    import torch
+    
+    # Basic CUDA availability check
+    logger.info(f"PyTorch version: {torch.__version__}")
+    logger.info(f"CUDA available: {torch.cuda.is_available()}")
+    
+    if torch.cuda.is_available():
+        logger.info(f"CUDA version: {torch.version.cuda}")
+        logger.info(f"Current CUDA device: {torch.cuda.current_device()}")
+        logger.info(f"Device count: {torch.cuda.device_count()}")
+        
+        # Get device name and properties
+        device_name = torch.cuda.get_device_name(0)
+        logger.info(f"Device name: {device_name}")
+        
+        # Try to get memory info
+        try:
+            free_mem, total_mem = torch.cuda.mem_get_info(0)
+            logger.info(f"VRAM: {total_mem / (1024**3):.2f} GB total, {free_mem / (1024**3):.2f} GB free")
+        except:
+            logger.info("Could not query GPU memory info")
+        
+        # Test tensor operations
+        try:
+            logger.info("Running GPU test tensor operation...")
+            # Use a reasonably sized tensor to verify computation without using too much memory
+            x = torch.randn(1000, 1000, device='cuda')
+            y = torch.randn(1000, 1000, device='cuda')
+            
+            # Record start time
+            start_time = time.time()
+            
+            # Perform matrix multiplication (computationally intensive operation)
+            z = torch.matmul(x, y)
+            
+            # Record end time and calculate duration
+            duration = time.time() - start_time
+            
+            # Force synchronization to ensure operation is complete
+            torch.cuda.synchronize()
+            
+            logger.info(f"GPU test successful! Result shape: {z.shape}")
+            logger.info(f"Operation completed in {duration*1000:.2f} ms")
+            
+            # Clean up GPU memory
+            del x, y, z
+            torch.cuda.empty_cache()
+            
+            logger.info("GPU test passed ✓")
+        except Exception as e:
+            logger.error(f"GPU test failed: {e}")
+    else:
+        logger.warning("CUDA is not available. Will run on CPU instead.")
+    
+    logger.info("================================")
+
 def main():
     """
     Main entry point. Loads configuration and runs all specified experiments.
     """
     # Setup logging
     setup_logger()
+    
+    # Run GPU test at startup
+    test_gpu_functionality()
 
     # Clean up disk space before starting
     mlflow_dir = os.path.abspath(os.path.join(os.getcwd(), "mlruns"))

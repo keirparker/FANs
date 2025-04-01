@@ -132,13 +132,17 @@ def setup_windows_environment(config):
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         os.environ["CUDA_CACHE_DISABLE"] = "0"
         
-        # Check if it might be a Gigabyte GPU by checking GPU name
+        # Check GPU by checking GPU name
         if torch.cuda.device_count() > 0:
             try:
                 gpu_name = torch.cuda.get_device_name(0).upper()
+                logger.info(f"Detected CUDA GPU: {gpu_name}")
+                # Check for NVIDIA GPUs including GeForce GTX 1660
+                is_nvidia_gpu = any(brand in gpu_name for brand in ['NVIDIA', 'GEFORCE', 'GTX', 'RTX'])
+                
                 # Mark in config that we've detected Windows-specific setup
-                if 'GIGABYTE' in gpu_name or 'AORUS' in gpu_name:
-                    logger.info(f"Detected possible Gigabyte GPU on Windows: {gpu_name}")
+                if is_nvidia_gpu or 'GIGABYTE' in gpu_name or 'AORUS' in gpu_name:
+                    logger.info(f"Optimizing for GPU on Windows: {gpu_name}")
                     # Store device info in config for later use
                     if "device_info" not in config:
                         config["device_info"] = {}
@@ -146,12 +150,29 @@ def setup_windows_environment(config):
                     config["device_info"]["is_windows"] = True
                     config["device_info"]["is_windows_gigabyte"] = True
                     
-                    # Apply Gigabyte GPU specific settings from config
+                    # Get VRAM info if possible
+                    try:
+                        free_mem, total_mem = torch.cuda.mem_get_info(0)
+                        vram_mb = int(total_mem / (1024 * 1024))  # Convert to MB
+                        logger.info(f"GPU VRAM: {vram_mb} MB")
+                        
+                        # Store VRAM info in config
+                        if "gigabyte_gpu_info" not in config["device_info"]:
+                            config["device_info"]["gigabyte_gpu_info"] = {}
+                        config["device_info"]["gigabyte_gpu_info"]["vram"] = vram_mb
+                    except:
+                        logger.info("Could not get VRAM information")
+                    
+                    # Apply GPU specific settings from config
                     if config.get("hyperparameters", {}).get("windows_memory_optimization", True):
                         # Enable JIT fusion optimization for Windows
                         torch._C._jit_set_profiling_executor(True)
                         torch._C._jit_set_profiling_mode(True)
-                        logger.info("Enabled PyTorch JIT optimizations for Windows Gigabyte GPU")
+                        logger.info("Enabled PyTorch JIT optimizations for Windows GPU")
+                        
+                        # Set PYTORCH_CUDA_ALLOC_CONF for more efficient memory usage
+                        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+                        logger.info("Set CUDA memory allocation configuration for better efficiency")
             except Exception as e:
                 logger.warning(f"Error detecting GPU information on Windows: {e}")
     
