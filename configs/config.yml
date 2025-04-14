@@ -1,11 +1,11 @@
-experiment_name: "simple run"
+experiment_name: "gated fix for below"
 
 models_to_run:
-  - MLP
-  - FAN
-  - FANGated
-  - FANPhaseOffsetModel
-  - FANPhaseOffsetModelGated
+#  - MLP
+#  - FAN
+#  - FANGated
+#  - FANPhaseOffsetModel
+#  - FANPhaseOffsetModelGated
   - FANPhaseOffsetModelUniform
 #  - FANAmplitudePhaseModel
 #  - FANUnconstrainedBasisModel
@@ -52,7 +52,7 @@ hyperparameters:
   multigpu: false         # Disable multi-GPU for single GPU setup
   gradient_accumulation_steps: 2   # Reduced for single GPU
   distributed_training: false      # Disable distributed training for single GPU
-  device: "cuda"          # Explicitly set to use CUDA
+  device: "auto"          # Auto-detect the best available device
   
   # NaN loss prevention settings
   nan_detection: true              # Enable advanced NaN detection and handling
@@ -81,7 +81,7 @@ random_seed: 42
 # 'deterministic': Ensures reproducible results, but slower
 performance_setting: 'fast'
 
-# CUDA forced usage settings for EC2 p3.8x instances
-force_cuda: true  # Try to use CUDA even when detection fails
-bypass_pytorch_cuda_check: true  # Uses monkey patching to override PyTorch's CUDA detection
-cuda_version: "12.4"  # Specify CUDA version installed on the instance
+# Device detection settings
+force_cuda: false  # Set to false to let PyTorch auto-detect available devices
+bypass_pytorch_cuda_check: false  # Disable monkey patching of PyTorch's CUDA detection
+cuda_version: "12.4"  # Specify CUDA version installed on the instance if available

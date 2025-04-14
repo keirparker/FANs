@@ -629,15 +629,37 @@ class FANPhaseOffsetModelGated(nn.Module):
             with torch.no_grad():
                 _ = self(dummy_input)
         
-        # Time multiple runs
-        torch.cuda.synchronize() if device.type == 'cuda' else None
+        # Time multiple runs with proper synchronization for each device type
+        try:
+            # Synchronize based on device type
+            if device.type == 'cuda':
+                # Only sync if CUDA is actually available and built
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+            elif device.type == 'mps':
+                # For Apple Silicon (M1/M2)
+                pass  # MPS doesn't have an explicit synchronize method
+        except (AssertionError, AttributeError, RuntimeError) as e:
+            # Handle case where CUDA is not compiled or other sync errors
+            logger.warning(f"Device synchronization error (safe to ignore): {e}")
+            
         start_time = time.time()
         
         for _ in range(num_repeats):
             with torch.no_grad():
                 _ = self(dummy_input)
                 
-        torch.cuda.synchronize() if device.type == 'cuda' else None
+        # Synchronize again based on device type
+        try:
+            if device.type == 'cuda':
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+            elif device.type == 'mps':
+                pass  # MPS doesn't have an explicit synchronize method
+        except (AssertionError, AttributeError, RuntimeError) as e:
+            # Handle case where CUDA is not compiled or other sync errors
+            pass
+            
         end_time = time.time()
         
         return (end_time - start_time) * 1000 / num_repeats

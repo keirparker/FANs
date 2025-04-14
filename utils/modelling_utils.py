@@ -176,7 +176,8 @@ def evaluate_model(model, t_test, data_test, device):
         }
         
         # For problematic models, use direct methods if available
-        if "FANPhaseOffsetModelGated" in model_copy.__class__.__name__ or "FANPhaseOffsetModelUniform" in model_copy.__class__.__name__:
+        if any(model_name in model_copy.__class__.__name__ for model_name in 
+               ["FANPhaseOffsetModelGated", "FANPhaseOffsetModelUniform", "FANPhaseOffsetModel"]):
             # Use model's direct methods if available
             try:
                 # Direct method for flops
@@ -201,7 +202,7 @@ def evaluate_model(model, t_test, data_test, device):
                     
                 mflops = flops / 1e6
                 
-                # Set all metrics explicitly
+                # Set all metrics explicitly as float values to prevent NaN problems
                 metrics["flops"] = float(flops)
                 metrics["mflops"] = float(mflops)
                 metrics["inference_time_ms"] = float(inference_time)
