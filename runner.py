@@ -147,6 +147,16 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                     )
                 )
 
+                # Normalize input features to prevent numerical instability
+                mean_t = np.mean(t_train)
+                std_t = np.std(t_train)
+                t_train = (t_train - mean_t) / std_t
+                t_test = (t_test - mean_t) / std_t  # Use training set's mean and std!
+                logger.info(f"Normalized time features: mean={mean_t:.4f}, std={std_t:.4f}")
+                # Log normalization parameters for reproducibility
+                mlflow.log_param("t_mean", mean_t)
+                mlflow.log_param("t_std", std_t)
+
                 # Add the experiment batch name as a tag for grouping
                 experiment_batch = config.get("experiment_name", "FAN_Model_Benchmark")
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -154,18 +164,8 @@ def run_experiment(model_name, dataset_type, data_version, config, experiment_id
                 mlflow.set_tag("batch_id", batch_id)
                 mlflow.set_tag("experiment_batch", experiment_batch)
 
-                # This second device selection is redundant and can be removed
-                # The device has already been determined and logged above
-
-                # 1. Generate the base dataset + retrieve underlying function (again)
-                logger.info(f"Generating {dataset_type} dataset...")
-                (t_train, data_train, t_test, data_test, data_config, true_func) = (
-                    get_periodic_data(
-                        periodic_type=dataset_type,
-                        num_train_samples=config["hyperparameters"]["num_samples"],
-                        num_test_samples=config["hyperparameters"]["test_samples"],
-                    )
-                )
+                # This second device selection and data generation is redundant and has been removed
+                # We already determined the device and generated/normalized the data above
 
                 # Log dataset sizes
                 mlflow.log_metric("train_size", len(t_train))

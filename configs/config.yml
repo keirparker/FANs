@@ -1,11 +1,11 @@
-experiment_name: "gated fix for below"
+experiment_name: "full run noisy"
 
 models_to_run:
-#  - MLP
-#  - FAN
-#  - FANGated
-#  - FANPhaseOffsetModel
-#  - FANPhaseOffsetModelGated
+  - MLP
+  - FAN
+  - FANGated
+  - FANPhaseOffsetModel
+  - FANPhaseOffsetModelGated
   - FANPhaseOffsetModelUniform
 #  - FANAmplitudePhaseModel
 #  - FANUnconstrainedBasisModel
@@ -23,13 +23,13 @@ datasets_to_run:
 
 
 data_versions:
-  - original
+#  - original
   - noisy
 #  - sparse
 
 hyperparameters:
   # Hardware-adaptive hyperparameters optimized for NVIDIA GeForce GTX 1660
-  early_stopping: True
+  early_stopping: False
   early_stopping_patience: 300
   early_stopping_min_delta: 0.00001
   num_samples: 20000
@@ -58,6 +58,8 @@ hyperparameters:
   nan_detection: true              # Enable advanced NaN detection and handling
   scheduler_patience: 10           # Increased patience for more stable LR reduction
   scheduler_factor: 0.5            # Less aggressive LR reduction factor
+  # Input feature normalization is now applied automatically to all time inputs
+  # to prevent numerical instability, especially for MLP models
   
   # Model saving options
   resume_training: False            # Enable to automatically resume from latest checkpoint

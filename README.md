@@ -40,6 +40,7 @@ The repository is structured to support experimentation with different FAN varia
 - MLflow integration for experiment tracking
 - Comprehensive visualization of model performance
 - Support for various hardware (CPU, CUDA, MPS)
+- Input feature normalization for numerical stability across all platforms
 
 ## Getting Started
 

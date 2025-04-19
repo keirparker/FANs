@@ -20,4 +20,4 @@ dev = [
 ]
 
 [tool.uv.workspace]
-members = ["FANs"]
+members = ["FANs", "FAN"]

@@ -317,6 +317,16 @@ def run_experiment(model_name, dataset_type, data_version, config):
     else:
         logger.error(f"Unknown data version: {data_version}")
         raise ValueError("Invalid data version")
+        
+    # Normalize input features to prevent numerical instability
+    mean_t = np.mean(t_train)
+    std_t = np.std(t_train)
+    t_train = (t_train - mean_t) / std_t
+    t_test = (t_test - mean_t) / std_t  # Use training set's mean and std!
+    logger.info(f"Normalized time features: mean={mean_t:.4f}, std={std_t:.4f}")
+    # Log normalization parameters for reproducibility
+    mlflow.log_param("t_mean", mean_t)
+    mlflow.log_param("t_std", std_t)
 
     # (3) Retrieve & train the model
     model = get_model_by_name(model_name)
