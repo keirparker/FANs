@@ -1,0 +1,68 @@
+experiment_name: "phase_offset_efficiency_test"
+
+models_to_run:
+  - FAN
+  - FANGated
+  - FANPhaseOffsetModel
+  - FANPhaseOffsetModelGated
+
+datasets_to_run:
+  - complex_1
+  - complex_3
+  - increasing_amp_freq
+
+data_versions:
+  - original
+
+hyperparameters:
+  # Early stopping
+  early_stopping: True
+  early_stopping_patience: 25
+  early_stopping_min_delta: 0.0001
+  
+  # Data parameters
+  num_samples: 5000
+  test_samples: 1000
+  noise_level: 0.15
+  sparsity_factor: 0.5
+  
+  # Training parameters
+  epochs: 200
+  lr: 0.001
+  min_lr: 0.000001
+  weight_decay: 0.00001
+  batch_size: 64
+  num_workers: 0
+  
+  # Hardware acceleration
+  use_amp: true
+  multigpu: false
+  gradient_accumulation_steps: 1
+  distributed_training: false
+  device: "auto"
+  
+  # Optimizer and scheduler
+  optimizer: "adamw"
+  use_scheduler: true
+  scheduler_type: "cosine" 
+  scheduler_patience: 10
+  scheduler_factor: 0.5
+  
+  # Batch processing
+  drop_last: true
+  clip_value: 0.5
+  clip_gradients: true
+  
+  # Stability features
+  nan_detection: true
+  
+  # Model saving
+  resume_training: False
+  save_model: False
+  min_improvement: 0.005
+
+logging:
+  level: "INFO"
+
+random_seed: 42
+performance_setting: 'fast'

@@ -1,0 +1,3 @@
+"""
+Signal generation core implementations.
+"""
