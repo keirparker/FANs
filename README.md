@@ -124,7 +124,6 @@ When comparing to standard transformer models, our FAN-based approaches offer su
 1. Install dependencies: `pip install -r requirements.txt`
 2. For synthetic signal experiments: `python -m signal_gen.run_signal_gen`
 3. For time series forecasting: `python -m time_series.run_time_series`
-4. For convergence analysis: `./run_convergence_analysis.sh`
 
 ## Key Advantages of Phase Offset Approach
 
