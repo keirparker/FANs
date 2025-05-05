@@ -1,0 +1,78 @@
+experiment_name: "Multivariate_Time_Series_Comparison"
+seed: 42
+
+# Convergence tracking parameters
+convergence_threshold: 0.1
+track_convergence: true
+
+models_to_run:
+  # Hybrid Phase model
+  - HybridPhaseFANForecaster
+  
+  # Standard models
+  - FANForecaster
+  - PhaseOffsetForecaster
+
+# Datasets
+datasets_to_run:
+  - ETTh1
+
+hyperparameters:
+  # Training parameters
+  batch_size: 32
+  epochs: 100
+  lr: 0.0005
+  weight_decay: 0.00005
+  warmup_steps: 5
+  optimizer: adamw
+  scheduler: cosine
+  
+  # Hardware optimizations
+  use_amp: false
+  grad_accum_steps: 1
+  pin_memory: false
+  prefetch_factor: 1
+  use_compile: false
+  persistent_workers: false
+  
+  # Time series parameters
+  stride: 1
+  
+  # Model parameters
+  hidden_dim: 64
+  d_model: 64
+  n_layers: 2
+  n_heads: 4
+  dropout: 0.1
+  use_checkpoint: true
+  
+  # Hybrid Phase FAN parameters
+  phase_decay_epochs: 10
+  
+  # Hardware settings
+  device: "auto"
+  num_workers: 2
+
+# Dataset-specific configurations
+dataset_config:
+  ETTh1:
+    lookback: 96
+    horizon: 24
+    input_dim: 7
+    norm_method: "standard"
+    batch_size: 32
+
+evaluation:
+  metrics:
+    - mae
+    - mse
+    - rmse
+  report_interval: 1
+
+logging:
+  log_interval: 10
+  eval_interval: 1
+  
+# Model saving settings
+save_best: true
+min_improvement: 0.005

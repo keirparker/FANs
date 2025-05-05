@@ -2,36 +2,28 @@ from loguru import logger
 import torch
 import torch.nn as nn
 import math
+import time
 
-# Use a module-level variable to track registration status
 _registered_models = set()
 model_registry = {}
 
 def register_model(model_name):
     def decorator(cls):
-        # Create a unique global variable name to prevent re-registration
         global _registered_models
         
-        # Only register once
         if model_name not in _registered_models:
             model_registry[model_name] = cls
             _registered_models.add(model_name)
-            # Comment out the debug message that's causing log spam
-            # logger.debug(f"Registered model class: {model_name}")
         return cls
     return decorator
 
 def get_model_by_name(model_name, *args, **kwargs):
     try:
-        from src.ts_models import FANForecaster, FANGatedForecaster, LSTMForecaster, TransformerForecaster
-        from src.fan_transformer import FANTransformer, FANTransformerForecaster, FANGatedTransformerForecaster
-        from src.transformer import StandardTransformer, StandardTransformerForecaster
-        from src.modified_transformer import ModifiedTransformer, ModifiedTransformerForecaster
-        from src.phase_offset_transformer import (
-            FANPhaseOffsetTransformer,
-            FANPhaseOffsetTransformerForecaster,
-            FANPhaseOffsetGatedTransformerForecaster
-        )
+        import sys
+        import os
+        # Add parent directory to sys.path
+        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
         logger.debug(f"Imported all model modules. Registry has {len(model_registry)} models.")
     except ImportError as e:
         logger.warning(f"Could not import some model modules: {e}")
@@ -55,10 +47,11 @@ class FANLayer(nn.Module):
         self.activation = nn.GELU()
 
     def forward(self, src):
-        logger.debug(f"FANLayer forward called with src.shape={src.shape}")
         g = self.activation(self.input_linear_g(src))
         p = self.input_linear_p(src)
-        output = torch.cat((torch.cos(p), torch.sin(p), g), dim=-1)
+        cos_p = torch.cos(p)
+        sin_p = torch.sin(p)
+        output = torch.cat((cos_p, sin_p, g), dim=-1)
         return output
 
 @register_model("FANLayerGated")
@@ -74,16 +67,17 @@ class FANLayerGated(nn.Module):
             logger.debug("Gate parameter created for FANLayerGated")
 
     def forward(self, src):
-        logger.debug(f"FANLayerGated forward called with src.shape={src.shape}")
         g = self.activation(self.input_linear_g(src))
         p = self.input_linear_p(src)
+        cos_p = torch.cos(p)
+        sin_p = torch.sin(p)
+        
         if not hasattr(self, "gate"):
-            output = torch.cat((torch.cos(p), torch.sin(p), g), dim=-1)
+            output = torch.cat((cos_p, sin_p, g), dim=-1)
         else:
             gate_val = torch.sigmoid(self.gate)
-            logger.debug(f"Current gate value (sigmoid): {gate_val.item():.4f}")
             output = torch.cat(
-                (gate_val * torch.cos(p), gate_val * torch.sin(p), (1 - gate_val) * g),
+                (gate_val * cos_p, gate_val * sin_p, (1 - gate_val) * g),
                 dim=-1
             )
         return output
@@ -96,6 +90,7 @@ class FAN(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
+        self.history = {"train_loss": [], "val_loss": [], "epochs": [], "metrics": []}
 
         self.embedding = nn.Linear(input_dim, hidden_dim)
         self.layers = nn.ModuleList()
@@ -104,11 +99,25 @@ class FAN(nn.Module):
         self.layers.append(nn.Linear(hidden_dim, output_dim))
 
     def forward(self, src):
-        logger.debug(f"FAN forward called with src.shape={src.shape}")
         output = self.embedding(src)
         for layer in self.layers:
             output = layer(output)
         return output
+        
+    def get_converge_epoch(self):
+        """Return the epoch at which the model converged."""
+        if not hasattr(self, 'history') or not self.history.get('val_loss'):
+            # Return a default value if history is not available
+            return len(self.history.get('epochs', [])) if hasattr(self, 'history') else 0
+            
+        val_losses = self.history.get('val_loss', [])
+        if not val_losses:
+            return 0
+            
+        # Find the epoch with the minimum validation loss
+        min_loss_idx = val_losses.index(min(val_losses))
+        epochs = self.history.get('epochs', list(range(1, len(val_losses) + 1)))
+        return epochs[min_loss_idx] if min_loss_idx < len(epochs) else 0
 
 @register_model("FANGated")
 class FANGated(nn.Module):
@@ -118,6 +127,7 @@ class FANGated(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
+        self.history = {"train_loss": [], "val_loss": [], "epochs": [], "metrics": []}
 
         self.embedding = nn.Linear(input_dim, hidden_dim)
         self.layers = nn.ModuleList()
@@ -126,11 +136,25 @@ class FANGated(nn.Module):
         self.layers.append(nn.Linear(hidden_dim, output_dim))
 
     def forward(self, src):
-        logger.debug(f"FANGated forward called with src.shape={src.shape}")
         output = self.embedding(src)
         for layer in self.layers:
             output = layer(output)
         return output
+        
+    def get_converge_epoch(self):
+        """Return the epoch at which the model converged."""
+        if not hasattr(self, 'history') or not self.history.get('val_loss'):
+            # Return a default value if history is not available
+            return len(self.history.get('epochs', [])) if hasattr(self, 'history') else 0
+            
+        val_losses = self.history.get('val_loss', [])
+        if not val_losses:
+            return 0
+            
+        # Find the epoch with the minimum validation loss
+        min_loss_idx = val_losses.index(min(val_losses))
+        epochs = self.history.get('epochs', list(range(1, len(val_losses) + 1)))
+        return epochs[min_loss_idx] if min_loss_idx < len(epochs) else 0
 
 @register_model("MLP")
 class MLPModel(nn.Module):
@@ -141,6 +165,7 @@ class MLPModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.use_embedding = use_embedding
+        self.history = {"train_loss": [], "val_loss": [], "epochs": [], "metrics": []}
 
         self.activation = nn.GELU()
         self.layers = nn.ModuleList()
@@ -154,11 +179,25 @@ class MLPModel(nn.Module):
         self.layers.append(nn.Linear(hidden_dim, output_dim))
 
     def forward(self, src):
-        logger.debug(f"MLPModel forward called with src.shape={src.shape}")
         output = self.embedding(src) if hasattr(self, "embedding") else src
         for layer in self.layers:
             output = layer(output)
         return output
+        
+    def get_converge_epoch(self):
+        """Return the epoch at which the model converged."""
+        if not hasattr(self, 'history') or not self.history.get('val_loss'):
+            # Return a default value if history is not available
+            return len(self.history.get('epochs', [])) if hasattr(self, 'history') else 0
+            
+        val_losses = self.history.get('val_loss', [])
+        if not val_losses:
+            return 0
+            
+        # Find the epoch with the minimum validation loss
+        min_loss_idx = val_losses.index(min(val_losses))
+        epochs = self.history.get('epochs', list(range(1, len(val_losses) + 1)))
+        return epochs[min_loss_idx] if min_loss_idx < len(epochs) else 0
 
 
 @register_model("FANLayerOffsetOnlyCos")
@@ -191,6 +230,7 @@ class FANLayerOffsetOnlyCos(nn.Module):
 class FANOffsetOnlyCosModel(nn.Module):
     def __init__(self, input_dim=1, output_dim=1, hidden_dim=2048, num_layers=3, bias=True):
         super(FANOffsetOnlyCosModel, self).__init__()
+        self.history = {"train_loss": [], "val_loss": [], "epochs": [], "metrics": []}
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
 
@@ -207,6 +247,21 @@ class FANOffsetOnlyCosModel(nn.Module):
             x = layer(x)
 
         return x
+        
+    def get_converge_epoch(self):
+        """Return the epoch at which the model converged."""
+        if not hasattr(self, 'history') or not self.history.get('val_loss'):
+            # Return a default value if history is not available
+            return len(self.history.get('epochs', [])) if hasattr(self, 'history') else 0
+            
+        val_losses = self.history.get('val_loss', [])
+        if not val_losses:
+            return 0
+            
+        # Find the epoch with the minimum validation loss
+        min_loss_idx = val_losses.index(min(val_losses))
+        epochs = self.history.get('epochs', list(range(1, len(val_losses) + 1)))
+        return epochs[min_loss_idx] if min_loss_idx < len(epochs) else 0
 
 
 @register_model("FANLayerPhaseOffset")
@@ -224,7 +279,6 @@ class FANLayerPhaseOffset(nn.Module):
         self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
         self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
         
-        # Initialize weights properly to prevent NaN
         nn.init.xavier_uniform_(self.input_linear_p.weight, gain=0.1)
         nn.init.xavier_uniform_(self.input_linear_g.weight, gain=0.1)
         if bias:
@@ -235,15 +289,19 @@ class FANLayerPhaseOffset(nn.Module):
         self.offset = nn.Parameter(torch.full((p_dim,), math.pi / 4))
 
     def forward(self, src):
+        # Vectorized implementation
         p = self.input_linear_p(src)
         g = self.activation(self.input_linear_g(src))
 
-        p_plus = p + self.offset
-        p_minus = p + (torch.pi / 2) - self.offset
+        # Efficiently compute phase offsets using broadcasting
+        p_plus = p + self.offset  # Broadcasting adds offset to each row
+        p_minus = p + (torch.pi / 2) - self.offset  # Broadcasting subtracts offset from each row
 
+        # Efficiently compute sine and cosine functions directly on tensors
         sin_part = torch.sin(p_plus)
         cos_part = torch.cos(p_minus)
 
+        # Concatenate results efficiently
         output = torch.cat((sin_part, cos_part, g), dim=-1)
         return output
 
@@ -257,6 +315,7 @@ class FANPhaseOffsetModel(nn.Module):
 
         logger.info("Initializing FANPhaseOffsetModel ...")
         self.input_dim = input_dim
+        self.history = {"train_loss": [], "val_loss": [], "epochs": [], "metrics": []}
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
 
@@ -282,6 +341,21 @@ class FANPhaseOffsetModel(nn.Module):
 
         return x
         
+    def get_converge_epoch(self):
+        """Return the epoch at which the model converged."""
+        if not hasattr(self, 'history') or not self.history.get('val_loss'):
+            # Return a default value if history is not available
+            return len(self.history.get('epochs', [])) if hasattr(self, 'history') else 0
+            
+        val_losses = self.history.get('val_loss', [])
+        if not val_losses:
+            return 0
+            
+        # Find the epoch with the minimum validation loss
+        min_loss_idx = val_losses.index(min(val_losses))
+        epochs = self.history.get('epochs', list(range(1, len(val_losses) + 1)))
+        return epochs[min_loss_idx] if min_loss_idx < len(epochs) else 0
+        
 @register_model("FANPhaseOffsetModelUniform")
 class FANPhaseOffsetModelUniform(nn.Module):
     def __init__(
@@ -291,20 +365,37 @@ class FANPhaseOffsetModelUniform(nn.Module):
 
         logger.info("Initializing FANPhaseOffsetModelUniform with uniform phase initialization in [0, 2π) ...")
         self.input_dim = input_dim
+        self.history = {"train_loss": [], "val_loss": [], "epochs": [], "metrics": []}
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
         nn.init.xavier_uniform_(self.embedding.weight, gain=0.1)
         if bias:
             nn.init.zeros_(self.embedding.bias)
 
-        # Create a custom FANLayerPhaseOffset class for this model
+        # Define inner class with vectorized implementation
         class FANLayerPhaseOffsetUniform(FANLayerPhaseOffset):
             def __init__(self, input_dim, output_dim, bias=True):
                 super(FANLayerPhaseOffsetUniform, self).__init__(input_dim, output_dim, bias)
-                # Override the offset initialization to use uniform distribution in [0, 2π)
                 p_dim = output_dim // 4
-                # Initialize offset parameters uniformly in [0, 2π)
+                # Initialize with uniform distribution
                 self.offset = nn.Parameter(torch.empty(p_dim).uniform_(0, 2 * math.pi))
+                
+            def forward(self, src):
+                # Vectorized implementation
+                p = self.input_linear_p(src)  # Process all inputs at once
+                g = self.activation(self.input_linear_g(src))  # Process all inputs at once
+                
+                # Vectorized phase offsets using broadcasting
+                p_plus = p + self.offset  # Broadcasting adds offset to each row
+                p_minus = p + (torch.pi / 2) - self.offset  # Broadcasting subtracts from each row
+                
+                # Vectorized trigonometric operations
+                sin_part = torch.sin(p_plus)  # Compute all at once
+                cos_part = torch.cos(p_minus)  # Compute all at once
+                
+                # Efficient concatenation
+                output = torch.cat((sin_part, cos_part, g), dim=-1)
+                return output
                 
         self.layers = nn.ModuleList()
         for _ in range(num_layers - 1):
@@ -317,23 +408,33 @@ class FANPhaseOffsetModelUniform(nn.Module):
             
         self.layers.append(self.output_layer)
 
-    # Support direct calculation for efficiency metrics
     def get_flops(self):
-        # Return estimated FLOPs based on parameter count
         param_count = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return float(param_count * 3)
     
-    # Support direct counting for efficiency metrics
     def count_params(self):
         return float(sum(p.numel() for p in self.parameters() if p.requires_grad))
         
+    def get_converge_epoch(self):
+        """Return the epoch at which the model converged."""
+        if not hasattr(self, 'history') or not self.history.get('val_loss'):
+            # Return a default value if history is not available
+            return len(self.history.get('epochs', [])) if hasattr(self, 'history') else 0
+            
+        val_losses = self.history.get('val_loss', [])
+        if not val_losses:
+            return 0
+            
+        # Find the epoch with the minimum validation loss
+        min_loss_idx = val_losses.index(min(val_losses))
+        epochs = self.history.get('epochs', list(range(1, len(val_losses) + 1)))
+        return epochs[min_loss_idx] if min_loss_idx < len(epochs) else 0
+        
     def forward(self, src):
-        # Handle ALL possible input shapes from efficiency calculations
+        # Handle various input formats
         if isinstance(src, tuple) and len(src) == 0:
-            # Handle empty tuple (can happen during efficiency metrics calculation)
             src = torch.randn(1, self.input_dim).to(next(self.parameters()).device)
         elif isinstance(src, tuple):
-            # Handle tuple input (can happen during efficiency metrics calculation)
             src = torch.randn(1, self.input_dim).to(next(self.parameters()).device)
         elif src.dim() == 1:
             src = src.unsqueeze(1)
@@ -343,17 +444,18 @@ class FANPhaseOffsetModelUniform(nn.Module):
             if src.shape[1] > 1:
                 src = src[:, :1]
 
-        # Prevent NaN inputs
+        # Handle NaN values
         if torch.isnan(src).any():
             logger.warning("NaN detected in input, replacing with zeros")
             src = torch.where(torch.isnan(src), torch.zeros_like(src), src)
 
+        # Process through the network using vectorized operations
         x = self.embedding(src)
 
         for layer in self.layers:
             x = layer(x)
             
-            # Check for NaN values and replace them during forward pass
+            # Check for NaNs after each layer
             if torch.isnan(x).any():
                 logger.warning("NaN detected in intermediate layer, replacing with zeros")
                 x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
@@ -422,7 +524,6 @@ class FANLayerPhaseOffsetZero(nn.Module):
         self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
         self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
         
-        # Initialize weights properly to prevent NaN
         nn.init.xavier_uniform_(self.input_linear_p.weight, gain=0.1)
         nn.init.xavier_uniform_(self.input_linear_g.weight, gain=0.1)
         if bias:
@@ -437,26 +538,31 @@ class FANLayerPhaseOffsetZero(nn.Module):
         self.offset = nn.Parameter(torch.zeros(p_dim))
 
     def forward(self, src):
+        # Vectorized implementation
+        # Process all inputs at once
         p = self.input_linear_p(src)
         g = self.activation(self.input_linear_g(src))
 
-        # Apply limit if specified
+        # Calculate phase offsets using efficient broadcasting
         actual_offset = self.offset
         if self.limit_phase_offset:
             actual_offset = self.max_phase * torch.tanh(self.offset)
             
+        # Apply offsets with broadcasting
         p_plus = p + actual_offset
         p_minus = p + (torch.pi / 2) - actual_offset
 
-        # Check for NaN values and replace them
+        # Handle NaN values efficiently with vectorized operations
         if torch.isnan(p_plus).any() or torch.isnan(p_minus).any():
             logger.warning("NaN detected in phase offset computation, replacing with zeros")
             p_plus = torch.where(torch.isnan(p_plus), torch.zeros_like(p_plus), p_plus)
             p_minus = torch.where(torch.isnan(p_minus), torch.zeros_like(p_minus), p_minus)
 
+        # Apply trigonometric functions to entire tensors at once
         sin_part = torch.sin(p_plus)
         cos_part = torch.cos(p_minus)
 
+        # Concatenate results efficiently
         output = torch.cat((sin_part, cos_part, g), dim=-1)
         return output
 
@@ -470,21 +576,23 @@ class FANPhaseOffsetModelZero(nn.Module):
             hidden_dim: int = 2048,
             num_layers: int = 3,
             bias: bool = True,
-            limit_phase_offset: bool = True,  # Changed default to True for stability
+            limit_phase_offset: bool = True,
             max_phase: float = math.pi,
     ):
         super(FANPhaseOffsetModelZero, self).__init__()
         if num_layers < 2:
             raise ValueError("num_layers must be >= 2 (embedding + final at minimum).")
 
-        logger.info("Initializing FANPhaseOffsetModelZero ...")
+        logger.info("Initializing FANPhaseOffsetModelZero with vectorized implementation...")
+        self.history = {"train_loss": [], "val_loss": [], "epochs": [], "metrics": []}
 
+        # Input projection
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
-        # Initialize embedding layer properly
         nn.init.xavier_uniform_(self.embedding.weight, gain=0.1)
         if bias:
             nn.init.zeros_(self.embedding.bias)
 
+        # Create layers with efficient implementation
         self.layers = nn.ModuleList()
         for _ in range(num_layers - 1):
             self.layers.append(
@@ -497,33 +605,52 @@ class FANPhaseOffsetModelZero(nn.Module):
                 )
             )
 
+        # Output projection
         self.output_layer = nn.Linear(hidden_dim, output_dim, bias=bias)
-        # Initialize output layer properly
         nn.init.xavier_uniform_(self.output_layer.weight, gain=0.1)
         if bias:
             nn.init.zeros_(self.output_layer.bias)
             
         self.layers.append(self.output_layer)
+        
+    def get_converge_epoch(self):
+        """Return the epoch at which the model converged."""
+        if not hasattr(self, 'history') or not self.history.get('val_loss'):
+            # Return a default value if history is not available
+            return len(self.history.get('epochs', [])) if hasattr(self, 'history') else 0
+            
+        val_losses = self.history.get('val_loss', [])
+        if not val_losses:
+            return 0
+            
+        # Find the epoch with the minimum validation loss
+        min_loss_idx = val_losses.index(min(val_losses))
+        epochs = self.history.get('epochs', list(range(1, len(val_losses) + 1)))
+        return epochs[min_loss_idx] if min_loss_idx < len(epochs) else 0
 
     def forward(self, src: torch.Tensor) -> torch.Tensor:
+        # Efficiently handle various input formats
         if src.dim() == 1:
-            src = src.unsqueeze(-1)
+            src = src.unsqueeze(-1)  # Add feature dimension efficiently
         elif src.dim() == 3:
-            src = src.squeeze(1)
+            src = src.squeeze(1)  # Remove unnecessary dimension efficiently
         elif src.dim() > 3:
-            logger.warning(f"Unexpected input shape: {src.shape}, expected 2D tensor")
+            # Reshape multi-dimensional input in one operation
+            logger.warning(f"Unexpected input shape: {src.shape}, reshaping to 2D tensor")
+            src = src.reshape(src.shape[0], -1)  # Flatten all dimensions after batch dimension
 
-        # Prevent NaN inputs
+        # Handle NaN values in a single vectorized operation
         if torch.isnan(src).any():
             logger.warning("NaN detected in input, replacing with zeros")
             src = torch.where(torch.isnan(src), torch.zeros_like(src), src)
 
+        # Process through the network using efficient forward passes
         x = self.embedding(src)
 
         for layer in self.layers:
             x = layer(x)
             
-            # Check for NaN values and replace them during forward pass
+            # Efficiently handle NaN values
             if torch.isnan(x).any():
                 logger.warning("NaN detected in intermediate layer, replacing with zeros")
                 x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
@@ -545,7 +672,6 @@ class FANLayerPhaseOffsetGated(nn.Module):
         self.input_linear_p = nn.Linear(input_dim, p_dim, bias=bias)
         self.input_linear_g = nn.Linear(input_dim, g_dim, bias=bias)
         
-        # Initialize weights properly to prevent NaN
         nn.init.xavier_uniform_(self.input_linear_p.weight, gain=0.1)
         nn.init.xavier_uniform_(self.input_linear_g.weight, gain=0.1)
         if bias:
@@ -554,25 +680,30 @@ class FANLayerPhaseOffsetGated(nn.Module):
             
         self.activation = nn.GELU()
 
-        # Initialize with original values
-        self.offset = nn.Parameter(torch.full((p_dim,), math.pi/4))  # Original offset value
-        self.gate = nn.Parameter(torch.randn(1, dtype=torch.float32))  # Random initial value
+        self.offset = nn.Parameter(torch.full((p_dim,), math.pi/4))
+        self.gate = nn.Parameter(torch.randn(1, dtype=torch.float32))
 
     def forward(self, src):
+        # Vectorized implementation
         p = self.input_linear_p(src)
         g = self.activation(self.input_linear_g(src))
 
-        p_plus = p + self.offset
-        p_minus = p + (torch.pi / 2) - self.offset
+        # Efficiently compute phase offsets using broadcasting
+        p_plus = p + self.offset  # Broadcasting adds offset to each row
+        p_minus = p + (torch.pi / 2) - self.offset  # Broadcasting subtracts offset from each row
 
+        # Efficiently compute sine and cosine functions directly on tensors
         sin_part = torch.sin(p_plus)
         cos_part = torch.cos(p_minus)
 
+        # Compute gating factor
         gamma = torch.sigmoid(self.gate)
 
+        # Apply gating using efficient broadcasting
         fourier_branch = gamma * torch.cat((sin_part, cos_part), dim=-1)
         nonlinear_branch = (1 - gamma) * g
 
+        # Concatenate results efficiently
         output = torch.cat((fourier_branch, nonlinear_branch), dim=-1)
         return output
 
@@ -585,13 +716,12 @@ class FANPhaseOffsetModelGated(nn.Module):
         super(FANPhaseOffsetModelGated, self).__init__()
         logger.info("Initializing FANPhaseOffsetModelGated ...")
         
-        # Store dimensions for later use
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.hidden_dim = hidden_dim
+        self.history = {"train_loss": [], "val_loss": [], "epochs": [], "metrics": []}
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
-        # Initialize with consistent gain=0.1 value as other FAN models
         nn.init.xavier_uniform_(self.embedding.weight, gain=0.1)
         if bias:
             nn.init.zeros_(self.embedding.bias)
@@ -603,44 +733,50 @@ class FANPhaseOffsetModelGated(nn.Module):
             )
 
         self.output_layer = nn.Linear(hidden_dim, output_dim, bias=bias) 
-        # Initialize output layer with consistent gain
         nn.init.xavier_uniform_(self.output_layer.weight, gain=0.1)
         if bias:
             nn.init.zeros_(self.output_layer.bias)
             
         self.layers.append(self.output_layer)
+
+
     
-    # Direct count_params method to avoid NaN
     def count_params(self):
         return float(sum(p.numel() for p in self.parameters() if p.requires_grad))
     
-    # Direct get_flops method to avoid NaN
     def get_flops(self):
-        # Estimate: 3 operations per parameter
         return float(self.count_params() * 3)
     
-    # For direct efficiency measurement
+    def get_converge_epoch(self):
+        """Return the epoch at which the model converged."""
+        if not hasattr(self, 'history') or not self.history.get('val_loss'):
+            # Return a default value if history is not available
+            return len(self.history.get('epochs', [])) if hasattr(self, 'history') else 0
+            
+        val_losses = self.history.get('val_loss', [])
+        if not val_losses:
+            return 0
+            
+        # Find the epoch with the minimum validation loss
+        min_loss_idx = val_losses.index(min(val_losses))
+        epochs = self.history.get('epochs', list(range(1, len(val_losses) + 1)))
+        return epochs[min_loss_idx] if min_loss_idx < len(epochs) else 0
+    
     def measure_inference_time(self, num_repeats=50):
         device = next(self.parameters()).device
         dummy_input = torch.randn(1, self.input_dim).to(device)
         
-        # Warmup
         for _ in range(10):
             with torch.no_grad():
                 _ = self(dummy_input)
         
-        # Time multiple runs with proper synchronization for each device type
         try:
-            # Synchronize based on device type
             if device.type == 'cuda':
-                # Only sync if CUDA is actually available and built
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
             elif device.type == 'mps':
-                # For Apple Silicon (M1/M2)
-                pass  # MPS doesn't have an explicit synchronize method
+                pass
         except (AssertionError, AttributeError, RuntimeError) as e:
-            # Handle case where CUDA is not compiled or other sync errors
             logger.warning(f"Device synchronization error (safe to ignore): {e}")
             
         start_time = time.time()
@@ -649,15 +785,13 @@ class FANPhaseOffsetModelGated(nn.Module):
             with torch.no_grad():
                 _ = self(dummy_input)
                 
-        # Synchronize again based on device type
         try:
             if device.type == 'cuda':
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
             elif device.type == 'mps':
-                pass  # MPS doesn't have an explicit synchronize method
-        except (AssertionError, AttributeError, RuntimeError) as e:
-            # Handle case where CUDA is not compiled or other sync errors
+                pass
+        except (AssertionError, AttributeError, RuntimeError):
             pass
             
         end_time = time.time()
@@ -665,18 +799,13 @@ class FANPhaseOffsetModelGated(nn.Module):
         return (end_time - start_time) * 1000 / num_repeats
 
     def forward(self, src):
-        # Handle ALL possible input shapes - very robust handling
         if isinstance(src, tuple) and len(src) == 0:
-            # Handle empty tuple (can happen during efficiency metrics calculation)
             src = torch.randn(1, self.input_dim).to(next(self.parameters()).device)
         elif isinstance(src, tuple):
-            # Handle tuple input (can happen during efficiency metrics calculation)
             src = torch.randn(1, self.input_dim).to(next(self.parameters()).device)
         elif src is None:
-            # Handle None input
             src = torch.randn(1, self.input_dim).to(next(self.parameters()).device)
         elif hasattr(src, 'shape') and len(src.shape) == 0:
-            # Handle scalar input
             src = torch.randn(1, self.input_dim).to(next(self.parameters()).device)
         elif src.dim() == 1:
             src = src.unsqueeze(-1)
@@ -688,7 +817,6 @@ class FANPhaseOffsetModelGated(nn.Module):
             if src.shape[1] > self.input_dim:
                 src = src[:, :self.input_dim]
             
-        # Prevent NaN inputs
         if torch.isnan(src).any():
             logger.warning("NaN detected in input, replacing with zeros")
             src = torch.where(torch.isnan(src), torch.zeros_like(src), src)
@@ -699,7 +827,6 @@ class FANPhaseOffsetModelGated(nn.Module):
             for layer in self.layers:
                 x = layer(x)
                 
-                # Check for NaN values and replace them during forward pass
                 if torch.isnan(x).any():
                     logger.warning("NaN detected in intermediate layer, replacing with zeros")
                     x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
@@ -707,7 +834,6 @@ class FANPhaseOffsetModelGated(nn.Module):
             return x
         except Exception as e:
             logger.warning(f"Error in forward pass: {e}, returning zeros")
-            # Return appropriate shape of zeros to avoid breaking the model
             batch_size = src.shape[0] if hasattr(src, 'shape') and len(src.shape) > 0 else 1
             return torch.zeros(batch_size, self.output_dim).to(next(self.parameters()).device)
 
@@ -755,6 +881,7 @@ class FANAmplitudePhaseModel(nn.Module):
         logger.info("Initializing FANAmplitudePhaseModel ...")
         self.input_dim = input_dim
         self.output_dim = output_dim
+        self.history = {"train_loss": [], "val_loss": [], "epochs": [], "metrics": []}
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
 
@@ -781,6 +908,21 @@ class FANAmplitudePhaseModel(nn.Module):
                 x = torch.cat([x, padding], dim=-1)
 
         return x
+        
+    def get_converge_epoch(self):
+        """Return the epoch at which the model converged."""
+        if not hasattr(self, 'history') or not self.history.get('val_loss'):
+            # Return a default value if history is not available
+            return len(self.history.get('epochs', [])) if hasattr(self, 'history') else 0
+            
+        val_losses = self.history.get('val_loss', [])
+        if not val_losses:
+            return 0
+            
+        # Find the epoch with the minimum validation loss
+        min_loss_idx = val_losses.index(min(val_losses))
+        epochs = self.history.get('epochs', list(range(1, len(val_losses) + 1)))
+        return epochs[min_loss_idx] if min_loss_idx < len(epochs) else 0
 
 
 @register_model("FANLayerMultiFrequency")
@@ -849,6 +991,7 @@ class FANMultiFrequencyModel(nn.Module):
         logger.info(
             "Initializing FANMultiFrequencyModel with %d frequencies...", n_freqs
         )
+        self.history = {"train_loss": [], "val_loss": [], "epochs": [], "metrics": []}
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
 
@@ -869,6 +1012,21 @@ class FANMultiFrequencyModel(nn.Module):
             x = layer(x)
 
         return x
+        
+    def get_converge_epoch(self):
+        """Return the epoch at which the model converged."""
+        if not hasattr(self, 'history') or not self.history.get('val_loss'):
+            # Return a default value if history is not available
+            return len(self.history.get('epochs', [])) if hasattr(self, 'history') else 0
+            
+        val_losses = self.history.get('val_loss', [])
+        if not val_losses:
+            return 0
+            
+        # Find the epoch with the minimum validation loss
+        min_loss_idx = val_losses.index(min(val_losses))
+        epochs = self.history.get('epochs', list(range(1, len(val_losses) + 1)))
+        return epochs[min_loss_idx] if min_loss_idx < len(epochs) else 0
 
 
 @register_model("FANLayerUnconstrainedBasis")
@@ -920,6 +1078,7 @@ class FANUnconstrainedBasisModel(nn.Module):
         super(FANUnconstrainedBasisModel, self).__init__()
 
         logger.info("Initializing FANUnconstrainedBasisModel ...")
+        self.history = {"train_loss": [], "val_loss": [], "epochs": [], "metrics": []}
 
         self.embedding = nn.Linear(input_dim, hidden_dim, bias=bias)
 
@@ -938,3 +1097,18 @@ class FANUnconstrainedBasisModel(nn.Module):
             x = layer(x)
 
         return x
+        
+    def get_converge_epoch(self):
+        """Return the epoch at which the model converged."""
+        if not hasattr(self, 'history') or not self.history.get('val_loss'):
+            # Return a default value if history is not available
+            return len(self.history.get('epochs', [])) if hasattr(self, 'history') else 0
+            
+        val_losses = self.history.get('val_loss', [])
+        if not val_losses:
+            return 0
+            
+        # Find the epoch with the minimum validation loss
+        min_loss_idx = val_losses.index(min(val_losses))
+        epochs = self.history.get('epochs', list(range(1, len(val_losses) + 1)))
+        return epochs[min_loss_idx] if min_loss_idx < len(epochs) else 0

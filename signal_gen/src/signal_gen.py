@@ -1,9 +1,6 @@
 import numpy as np
 from loguru import logger
 
-##############################################################################
-# For signals like 'complex_5' that have special logic, we define a helper
-##############################################################################
 def sawtooth_wave(t, n):
     """Generate a single term of the sawtooth wave harmonic series."""
     return (t / np.pi) - np.floor(t / np.pi + 0.5)
@@ -23,45 +20,30 @@ def increasing_amp_freq_fn(x: np.ndarray) -> np.ndarray:
     Generate a signal with progressively increasing amplitude and frequency
     that maintains phase continuity across any input range.
     """
-    # Normalize x for consistent scaling
     x_centered = x / 50.0
 
-    # Amplitude increases with |x|
     a_base = 0.2
     a_slope = 0.8
     amplitude = a_base + a_slope * np.abs(np.tanh(x_centered))
 
-    # Base frequency component
     f_base = 0.5
     f_slope = 2.0
 
-    # Use a proper phase accumulation approach
-    # Integrate frequency to get phase (using a closed form for this specific case)
-    # For a frequency function f(x) = f_base + f_slope*tanh(x), the phase is:
     phase = 2 * np.pi * (f_base * x_centered + f_slope * np.log(np.cosh(x_centered)))
 
-    # Generate the signal with continuous phase
     signal = amplitude * np.sin(phase)
 
-    # Apply consistent normalization
     signal = signal / 1.5
 
     return signal
 
 def gradually_increasing_frequency_fn(x: np.ndarray) -> np.ndarray:
-    """
-    Generate a wave with a frequency that slowly increases from low to high
-    across the domain. This creates a non-repeating pattern that gradually
-    becomes more compressed toward the right edge.
-    
-    FREQUENCY REDUCED FOR BETTER VISUALIZATION
-    """
+    """Generate a wave with a frequency that slowly increases from low to high."""
     x_min, x_max = np.min(x), np.max(x)
     position = (x - x_min) / (x_max - x_min)
     
-    # REDUCED FREQUENCIES by a factor of 75 (5 × 15)
-    base_freq = 0.133   # was 10.0, then 2.0, now 10.0/75
-    max_freq = 2.0   # was 150.0, then 30.0, now 150.0/75
+    base_freq = 0.133
+    max_freq = 2.0
     
     freq_factor = 1 / (1 + np.exp(-10 * (position - 0.7)))
     instantaneous_freq = base_freq + (max_freq - base_freq) * freq_factor
@@ -76,16 +58,9 @@ def gradually_increasing_frequency_fn(x: np.ndarray) -> np.ndarray:
     return signal
 
 def gradually_increasing_amplitude_fn(x: np.ndarray) -> np.ndarray:
-    """
-    Generate a wave with an amplitude that slowly increases from near zero to 1.0 
-    at the furthest right point. This function creates a non-repeating pattern 
-    that gradually expands to full amplitude.
-    
-    FREQUENCY REDUCED FOR BETTER VISUALIZATION
-    """
+    """Generate a wave with an amplitude that slowly increases from near zero to 1.0."""
     x_min, x_max = np.min(x), np.max(x)
-    # Reduced carrier frequency by a factor of 6
-    carrier_freq = 30.0  # was 180.0
+    carrier_freq = 30.0
     carrier = np.sin(2 * np.pi * carrier_freq * x / 60.0)
     
     position = (x - x_min) / (x_max - x_min)
@@ -97,28 +72,19 @@ def gradually_increasing_amplitude_fn(x: np.ndarray) -> np.ndarray:
     return signal
 
 def combined_freq_amp_modulation_fn(x: np.ndarray) -> np.ndarray:
-    """
-    Generate a wave that combines both gradually increasing frequency and amplitude.
-    This function creates a signal that becomes both higher in frequency and amplitude
-    from left to right.
-    
-    FREQUENCY REDUCED FOR BETTER VISUALIZATION
-    """
+    """Generate a wave that combines both gradually increasing frequency and amplitude."""
     x_min, x_max = np.min(x), np.max(x)
     position = (x - x_min) / (x_max - x_min)
     
-    # Frequency modulation parameters - REDUCED BY FACTOR OF 75 (5 × 15)
-    base_freq = 0.133   # was 10.0, then 2.0, now 10.0/75
-    max_freq = 2.0   # was 150.0, then 30.0, now 150.0/75
+    base_freq = 0.133
+    max_freq = 2.0
     freq_factor = 1 / (1 + np.exp(-10 * (position - 0.7)))
     instantaneous_freq = base_freq + (max_freq - base_freq) * freq_factor
     
-    # Integrate frequency to get phase
     dx = np.mean(np.diff(x)) if len(x) > 1 else 1.0
     phase = np.cumsum(instantaneous_freq * dx)
     phase = phase - phase[0]
     
-    # Amplitude modulation
     amplitude = 0.02 + 0.98 * (1 / (1 + np.exp(-10 * (position - 0.7))))
     
     signal = amplitude * np.sin(2 * np.pi * phase)
@@ -127,7 +93,6 @@ def combined_freq_amp_modulation_fn(x: np.ndarray) -> np.ndarray:
     return signal
 
 
-# PERIODIC_SPECS holds domain parameters and data functions for each signal type
 PERIODIC_SPECS = {
     "sin": {
         "period": 6,
@@ -313,42 +278,32 @@ PERIODIC_SPECS = {
 
 
 def get_periodic_data(periodic_type, num_train_samples=None, num_test_samples=None):
-    """
-    Retrieve training and test data for a given periodic type.
-
-    Returns:
-      t_train, data_train, t_test, data_test, config, true_func
-    """
+    """Retrieve training and test data for a given periodic type."""
     if periodic_type not in PERIODIC_SPECS:
         logger.error(f"Unknown periodic_type: {periodic_type}")
         raise ValueError(f"Unsupported periodic_type: {periodic_type}")
 
     spec = PERIODIC_SPECS[periodic_type]
     
-    # Handle both old and new format specs
     if "data_params" in spec:
-        # New format with separated parameter groups
         data_params = spec["data_params"]
         period = data_params["period"]
         domain_train = data_params["domain_train"]
         domain_test = data_params["domain_test"]
         
-        # Merge training and visualization params for backward compatibility
         config = {}
         if "training_params" in spec:
             config.update(spec["training_params"])
         if "viz_params" in spec:
             config.update(spec["viz_params"])
             
-        # Rename viz params to match old format
         if "y_upper" in config:
             config["y_uper"] = config.pop("y_upper")
     else:
-        # Old format - direct access
         period = spec["period"]
         domain_train = spec["domain_train"]
         domain_test = spec["domain_test"]
-        config = spec["config"]  # e.g., batchsize, etc.
+        config = spec["config"]
     
     # Data function is always at the top level
     data_fn = spec["data_fn"]

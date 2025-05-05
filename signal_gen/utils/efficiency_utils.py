@@ -8,6 +8,11 @@ import numpy as np
 from loguru import logger
 from typing import Dict, Any, Optional, List, Tuple
 import torch.nn as nn
+import os
+import sys
+
+# Add the parent directory to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 # Try to import thop for FLOPs counting
 try:
@@ -203,5 +208,15 @@ def compute_efficiency_metrics(
         total_training_flops = flops * 3 * num_epochs * dataset_size
         metrics["total_training_flops"] = total_training_flops
         metrics["training_flops_per_second"] = total_training_flops / max(1, training_time_seconds)
+    
+    # Calculate convergence metrics if we have model state
+    if hasattr(model, 'get_converge_epoch') and callable(getattr(model, 'get_converge_epoch')):
+        try:
+            converge_epoch = model.get_converge_epoch()
+            metrics["convergence_epoch"] = converge_epoch
+            if num_epochs is not None:
+                metrics["normalized_convergence"] = converge_epoch / max(1, num_epochs)
+        except (AttributeError, Exception) as e:
+            logger.debug(f"Failed to get convergence metrics: {e}")
     
     return metrics

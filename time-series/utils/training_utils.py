@@ -59,7 +59,8 @@ def create_optimizer(model, config):
     Returns:
         torch.optim.Optimizer: Configured optimizer
     """
-    device_type = model.embedding.weight.device.type
+    # Get device type in a more robust way - get first parameter's device
+    device_type = next(model.parameters()).device.type
     optimizer_type = config["hyperparameters"].get("optimizer", "adam").lower()
     lr = float(config["hyperparameters"].get("lr", 1e-3))
     
@@ -1265,36 +1266,12 @@ def train_model(model, t_train, data_train, config, device, validation_split=0.2
                 f"R²: {metrics['r2']:.4f}, RMSE: {metrics['rmse']:.4f}"
             )
             
-            # Save model only if explicitly enabled in config
-            save_model_enabled = config["hyperparameters"].get("save_model", False)
-            if save_model_enabled and epoch > 0:
-                # Determine if this is the best model so far
-                if 'best_val_loss' not in locals():
-                    best_val_loss = float('inf')
-                    
-                is_best = val_loss < best_val_loss
-                if is_best:
-                    best_val_loss = val_loss
-                    
-                    # Only save the best model (no periodic checkpoints)
-                    try:
-                        # Create checkpoints directory if it doesn't exist
-                        checkpoint_dir = os.path.join("models", "checkpoints")
-                        os.makedirs(checkpoint_dir, exist_ok=True)
-                        
-                        # Only include essential data to reduce file size
-                        checkpoint = {
-                            'epoch': epoch,
-                            'model_state_dict': model.state_dict(),
-                            'val_loss': val_loss,
-                        }
-                        
-                        # Only save best model
-                        checkpoint_path = os.path.join(checkpoint_dir, f"best_model.pt")
-                        logger.info(f"Saving best model checkpoint (val_loss={val_loss:.6f})")
-                        torch.save(checkpoint, checkpoint_path)
-                    except Exception as e:
-                        logger.warning(f"Failed to save model: {e}")
+            # Save model saving is now handled exclusively at the end of training in runner.py
+            # This code is intentionally disabled to prevent saving intermediate models
+            # The best model state will be tracked in memory and only saved once at the end
+            # 
+            # Note: To save the best model, use the save_best parameter in config.yml
+            pass
 
             # Scheduler step for ReduceLROnPlateau
             if scheduler is not None and isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
