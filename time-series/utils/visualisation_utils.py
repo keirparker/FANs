@@ -6,7 +6,7 @@ This module provides high-quality visualization capabilities for machine learnin
 model training history, predictions, and integration with MLflow.
 
 Author: GitHub Copilot for keirparker
-Last updated: 2025-02-26
+Last updated: 2025-05-08
 """
 
 import os
@@ -20,6 +20,48 @@ from typing import Dict, List, Optional, Callable
 from loguru import logger
 from datetime import datetime
 import mlflow
+import ray
+import shutil
+
+def init_ray_for_mac(num_cpus=None):
+    """Initialize Ray with settings optimized for M2 Macbook.
+    
+    Args:
+        num_cpus: Number of CPUs to use. If None, uses all available minus 2.
+        
+    Returns:
+        bool: True if Ray was successfully initialized, False otherwise
+    """
+    if ray.is_initialized():
+        return True
+
+    import multiprocessing
+    
+    if num_cpus is None:
+        # Leave 2 CPUs free for system operations on M2 Mac
+        available_cpus = multiprocessing.cpu_count()
+        num_cpus = max(1, available_cpus - 2)
+    
+    try:
+        ray.init(
+            num_cpus=num_cpus,
+            include_dashboard=False,
+            ignore_reinit_error=True,
+            _temp_dir="/tmp/ray_temp",  # Prevent permissions issues on macOS
+            _system_config={
+                # MacOS-specific configurations
+                "worker_register_timeout_seconds": 60,
+                "object_spilling_config": '{"type": "filesystem", "params": {"directory_path": "/tmp/ray_spill"}}',
+                "max_io_workers": 4,  # Reduce I/O worker threads for Mac
+                "object_store_full_delay_ms": 100  # More aggressive memory management
+            },
+            logging_level=logging.WARNING
+        )
+        logger.info(f"Ray initialized with {num_cpus} CPUs")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to initialize Ray: {e}. Will continue without parallel processing.")
+        return False
 
 # Configure matplotlib for publication-quality output
 plt.style.use("seaborn-v0_8-whitegrid")
@@ -1330,9 +1372,13 @@ def log_enhanced_plots_to_mlflow(
     output_dir: str = None,
     artifact_path: str = "enhanced_plots",
     run_number: int = None,
+    use_ray: bool = True,
+    num_cpus: Optional[int] = None,
 ):
     """
     Generate and log enhanced loss plots to MLflow.
+    
+    This function is deprecated - use create_enhanced_visualizations instead.
 
     Args:
         experiment_id: MLflow experiment ID
@@ -1340,70 +1386,138 @@ def log_enhanced_plots_to_mlflow(
         output_dir: Directory to save intermediate plots (defaults to time_series/plots if None)
         artifact_path: Path within MLflow artifacts to store plots
         run_number: Run number identifier (optional)
+        use_ray: Whether to use Ray for parallel processing (default: True)
+        num_cpus: Number of CPUs to use for Ray (default: None, which means auto-detect)
 
     Returns:
         List of generated file paths
     """
-    logger.info("Generating and logging enhanced loss plots to MLflow")
+    logger.warning("log_enhanced_plots_to_mlflow is deprecated. Use create_enhanced_visualizations instead.")
     
-    # Use time_series/plots if output_dir not specified
-    if output_dir is None:
-        time_series_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        output_dir = os.path.join(time_series_dir, "plots")
-
-    # Generate loss plots by dataset/datatype subgroups
-    plot_paths = plot_loss_by_subgroups(
-        run_ids,
-        output_dir=output_dir,
-        show_markers=True,  # Always show data points as markers
-        line_smoothing=0.0,  # No smoothing - show raw data
+    # Call the new function which has all the functionality
+    create_enhanced_visualizations(
+        run_ids=run_ids,
+        experiment_id=experiment_id,
+        experiment_name="EnhancedPlots",
+        run_number=run_number,
+        use_ray=use_ray,
+        num_cpus=num_cpus
     )
+    
+    # This is a bit of a hack, but we return an empty list since we can't easily
+    # get the plot paths from create_enhanced_visualizations
+    return []
 
-    # Log plots to MLflow as a separate "summary" run
-    if plot_paths:
-        try:
-            # Make sure there's no active run that might conflict
-            if mlflow.active_run():
-                mlflow.end_run()
-            
-            # Generate a unique run name with timestamp
-            timestr = time.strftime("%Y%m%d-%H%M%S")
-            
-            with mlflow.start_run(
-                run_name=f"EnhancedPlots-{timestr}", experiment_id=experiment_id
-            ):
-                # Log artifacts
-                for plot_path in plot_paths:
-                    mlflow.log_artifact(plot_path, artifact_path)
+@ray.remote
+def process_plot_data(subgroup_key, subgroup_data, model_colors, show_markers, line_smoothing):
+    """Process visualization data for one subgroup of models (Ray remote function)"""
+    dataset_type = subgroup_data["dataset_type"]
+    data_version = subgroup_data["data_version"]
+    models = subgroup_data["models"]
+    
+    # Skip if no models have data
+    if not models:
+        return None
+    
+    # Create figure
+    plt.figure(figsize=(12, 6))
+    
+    # Plot each model's train and validation loss
+    for model_name, model_data in sorted(models.items()):
+        color = model_colors[model_name]
 
-                # Log metadata
-                mlflow.set_tag("plot_type", "enhanced_loss_plots")
-                mlflow.set_tag("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                mlflow.set_tag("generated_by", os.environ.get("USER", "keirparker"))
-                mlflow.set_tag("runs_visualized", len(run_ids))
-                mlflow.set_tag("is_summary", "true")
-                
-                # Add run number if provided
-                if run_number is not None:
-                    mlflow.set_tag("run_number", str(run_number))
+        # Plot training loss
+        if model_data["train"]:
+            epochs = sorted(model_data["train"].keys())
+            values = [model_data["train"][e] for e in epochs]
 
-                # Log the run IDs that were analyzed
-                mlflow.log_param("analyzed_runs", ",".join(run_ids))
+            # Apply smoothing if requested
+            if line_smoothing > 0 and len(values) > 3:
+                smooth_values = apply_smoothing(values, line_smoothing)
+            else:
+                smooth_values = values
 
-                logger.info(
-                    f"Enhanced plots logged to MLflow with run ID: {mlflow.active_run().info.run_id}"
+            # For unsmoothed plots, we'll emphasize the markers
+            if show_markers:
+                # First plot the connecting line (thinner)
+                plt.plot(
+                    epochs,
+                    values,  # Use original values always
+                    linestyle="-",
+                    color=color,
+                    linewidth=1.0,
+                    alpha=0.7,
+                    label=f"{model_name}",
                 )
-        except Exception as e:
-            logger.error(f"Error logging enhanced plots to MLflow: {e}")
-            logger.info(f"Enhanced plots saved locally to {output_dir}")
+                
+                # Then add prominent markers
+                plt.scatter(
+                    epochs,
+                    values,
+                    marker="o",
+                    s=40,  # Larger markers
+                    color=color,
+                    alpha=0.9,  # More visible
+                    edgecolors="white",
+                    linewidth=0.7,
+                    zorder=10,  # Ensure markers are on top
+                )
+            else:
+                # Just plot the line without markers
+                line = plt.plot(
+                    epochs,
+                    values,  # Use original values, not smoothed
+                    linestyle="-",
+                    color=color,
+                    linewidth=1.5,
+                    label=f"{model_name}",
+                    alpha=0.9,
+                )[0]
 
-    return plot_paths
+    # Customize plot
+    plt.title(f"Loss Curves - {dataset_type} ({data_version})", fontsize=14)
+    plt.xlabel("Epoch", fontsize=12)
+    plt.ylabel("Loss", fontsize=12)
+    plt.grid(True, linestyle="--", alpha=0.7)
+
+    # Determine if log scale would be better
+    y_values = []
+    for model_data in models.values():
+        y_values.extend(list(model_data["train"].values()))
+
+    if y_values:
+        y_array = np.array(y_values)
+        if np.max(y_array) / np.min(y_array) > 10:
+            plt.yscale("log")
+
+    # Add legend - make it more compact if many models
+    if len(models) > 5:
+        plt.legend(fontsize=9, ncol=2, loc="best")
+    else:
+        plt.legend(fontsize=10, loc="best")
+
+    plt.tight_layout()
+
+    # Save plot to a temporary file
+    timestr = time.strftime("%Y%m%d-%H%M%S")
+    plot_filename = f"temp_plot_{dataset_type}_{data_version}_{timestr}.png"
+    plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
+    plt.close()
+    
+    return {
+        "subgroup_key": subgroup_key,
+        "dataset_type": dataset_type,
+        "data_version": data_version,
+        "plot_filename": plot_filename
+    }
 
 def plot_loss_by_subgroups(
     run_ids: List[str],
     output_dir: str = None,
     show_markers: bool = True,
     line_smoothing: float = 0.0,
+    use_ray: bool = True,
+    num_cpus: Optional[int] = None
 ):
     """
     Create separate loss plots for each dataset/datatype subgroup,
@@ -1414,6 +1528,8 @@ def plot_loss_by_subgroups(
         output_dir: Directory to save output plots (defaults to time_series/plots if None)
         show_markers: Whether to show data points as markers
         line_smoothing: Smoothing factor (0.0 = raw data, higher values = more smoothing)
+        use_ray: Whether to use Ray for parallel processing (default: True)
+        num_cpus: Number of CPUs to use for Ray. If None, uses all available minus 2.
 
     Returns:
         List of paths to saved plots
@@ -1468,16 +1584,12 @@ def plot_loss_by_subgroups(
                     except (ValueError, IndexError):
                         continue
 
-
         except Exception as e:
             logger.warning(f"Error processing run {run_id}: {e}")
 
     if not all_data:
         logger.warning("No loss data found in the provided runs")
         return []
-
-    # Generate plots - one for each subgroup
-    plot_paths = []
 
     # Create a consistent color palette for models across all plots
     all_models = set()
@@ -1487,110 +1599,148 @@ def plot_loss_by_subgroups(
     model_colors = dict(
         zip(sorted(list(all_models)), sns.color_palette("husl", len(all_models)))
     )
+    
+    # Initialize Ray for parallel plot generation if requested and multiple subgroups exist
+    plot_paths = []
+    timestr = time.strftime("%Y%m%d-%H%M%S")
+    
+    if use_ray and len(all_data) > 1:
+        try:
+            # Initialize Ray if not already initialized
+            if not ray.is_initialized():
+                init_ray_for_mac(num_cpus)
+                
+            # Submit plotting tasks in parallel
+            plot_tasks = [
+                process_plot_data.remote(
+                    subgroup_key, subgroup_data, model_colors, show_markers, line_smoothing
+                )
+                for subgroup_key, subgroup_data in sorted(all_data.items())
+            ]
+            
+            # Get results
+            plot_results = ray.get(plot_tasks)
+            
+            # Move temporary plots to final location
+            for result in plot_results:
+                if result is None:
+                    continue
+                
+                temp_path = result["plot_filename"]
+                final_path = f"{output_dir}/loss_plot_{result['dataset_type']}_{result['data_version']}_{timestr}.png"
+                
+                shutil.move(temp_path, final_path)
+                plot_paths.append(final_path)
+                logger.info(f"Created loss plot: {final_path}")
+                
+        except Exception as e:
+            logger.warning(f"Failed to use Ray for parallel plot generation: {e}. Falling back to sequential processing.")
+            use_ray = False  # Fall back to sequential processing
+    
+    # Sequential processing if Ray isn't available or there's only one subgroup
+    if not use_ray:
+        # Create one plot per subgroup
+        for subgroup_key, subgroup_data in sorted(all_data.items()):
+            dataset_type = subgroup_data["dataset_type"]
+            data_version = subgroup_data["data_version"]
+            models = subgroup_data["models"]
 
-    # Create one plot per subgroup
-    for subgroup_key, subgroup_data in sorted(all_data.items()):
-        dataset_type = subgroup_data["dataset_type"]
-        data_version = subgroup_data["data_version"]
-        models = subgroup_data["models"]
+            # Skip if no models have data
+            if not models:
+                continue
 
-        # Skip if no models have data
-        if not models:
-            continue
+            # Create figure
+            plt.figure(figsize=(12, 6))
 
-        # Create figure
-        plt.figure(figsize=(12, 6))
+            # Plot each model's train and validation loss
+            for model_name, model_data in sorted(models.items()):
+                color = model_colors[model_name]
 
-        # Plot each model's train and validation loss
-        for model_name, model_data in sorted(models.items()):
-            color = model_colors[model_name]
+                # Plot training loss
+                if model_data["train"]:
+                    epochs = sorted(model_data["train"].keys())
+                    values = [model_data["train"][e] for e in epochs]
 
-            # Plot training loss
-            if model_data["train"]:
-                epochs = sorted(model_data["train"].keys())
-                values = [model_data["train"][e] for e in epochs]
+                    # Apply smoothing if requested
+                    if line_smoothing > 0 and len(values) > 3:
+                        smooth_values = apply_smoothing(values, line_smoothing)
+                    else:
+                        smooth_values = values
 
-                # Apply smoothing if requested
-                if line_smoothing > 0 and len(values) > 3:
-                    smooth_values = apply_smoothing(values, line_smoothing)
-                else:
-                    smooth_values = values
+                    # For unsmoothed plots, we'll emphasize the markers
+                    if show_markers:
+                        # First plot the connecting line (thinner)
+                        plt.plot(
+                            epochs,
+                            values,  # Use original values always
+                            linestyle="-",
+                            color=color,
+                            linewidth=1.0,
+                            alpha=0.7,
+                            label=f"{model_name}",
+                        )
+                        
+                        # Then add prominent markers
+                        plt.scatter(
+                            epochs,
+                            values,
+                            marker="o",
+                            s=40,  # Larger markers
+                            color=color,
+                            alpha=0.9,  # More visible
+                            edgecolors="white",
+                            linewidth=0.7,
+                            zorder=10,  # Ensure markers are on top
+                        )
+                    else:
+                        # Just plot the line without markers
+                        line = plt.plot(
+                            epochs,
+                            values,  # Use original values, not smoothed
+                            linestyle="-",
+                            color=color,
+                            linewidth=1.5,
+                            label=f"{model_name}",
+                            alpha=0.9,
+                        )[0]
 
-                # For unsmoothed plots, we'll emphasize the markers
-                if show_markers:
-                    # First plot the connecting line (thinner)
-                    plt.plot(
-                        epochs,
-                        values,  # Use original values always
-                        linestyle="-",
-                        color=color,
-                        linewidth=1.0,
-                        alpha=0.7,
-                        label=f"{model_name}",
-                    )
-                    
-                    # Then add prominent markers
-                    plt.scatter(
-                        epochs,
-                        values,
-                        marker="o",
-                        s=40,  # Larger markers
-                        color=color,
-                        alpha=0.9,  # More visible
-                        edgecolors="white",
-                        linewidth=0.7,
-                        zorder=10,  # Ensure markers are on top
-                    )
-                else:
-                    # Just plot the line without markers
-                    line = plt.plot(
-                        epochs,
-                        values,  # Use original values, not smoothed
-                        linestyle="-",
-                        color=color,
-                        linewidth=1.5,
-                        label=f"{model_name}",
-                        alpha=0.9,
-                    )[0]
+            # Customize plot
+            plt.title(f"Loss Curves - {dataset_type} ({data_version})", fontsize=14)
+            plt.xlabel("Epoch", fontsize=12)
+            plt.ylabel("Loss", fontsize=12)
+            plt.grid(True, linestyle="--", alpha=0.7)
 
-        # Customize plot
-        plt.title(f"Loss Curves - {dataset_type} ({data_version})", fontsize=14)
-        plt.xlabel("Epoch", fontsize=12)
-        plt.ylabel("Loss", fontsize=12)
-        plt.grid(True, linestyle="--", alpha=0.7)
+            # Determine if log scale would be better
+            y_values = []
+            for model_data in models.values():
+                y_values.extend(list(model_data["train"].values()))
 
-        # Determine if log scale would be better
-        y_values = []
-        for model_data in models.values():
-            y_values.extend(list(model_data["train"].values()))
+            if y_values:
+                y_array = np.array(y_values)
+                if np.max(y_array) / np.min(y_array) > 10:
+                    plt.yscale("log")
 
-        if y_values:
-            y_array = np.array(y_values)
-            if np.max(y_array) / np.min(y_array) > 10:
-                plt.yscale("log")
+            # Add legend - make it more compact if many models
+            if len(models) > 5:
+                plt.legend(fontsize=9, ncol=2, loc="best")
+            else:
+                plt.legend(fontsize=10, loc="best")
 
-        # Add legend - make it more compact if many models
-        if len(models) > 5:
-            plt.legend(fontsize=9, ncol=2, loc="best")
-        else:
-            plt.legend(fontsize=10, loc="best")
+            plt.tight_layout()
 
-        plt.tight_layout()
+            # Save plot
+            plot_filename = (
+                f"{output_dir}/loss_plot_{dataset_type}_{data_version}_{timestr}.png"
+            )
+            plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
+            plt.close()
 
-        # Save plot
-        timestr = time.strftime("%Y%m%d-%H%M%S")
-        plot_filename = (
-            f"{output_dir}/loss_plot_{dataset_type}_{data_version}_{timestr}.png"
-        )
-        plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
-        plt.close()
-
-        plot_paths.append(plot_filename)
-        logger.info(f"Created loss plot: {plot_filename}")
+            plot_paths.append(plot_filename)
+            logger.info(f"Created loss plot: {plot_filename}")
 
     return plot_paths
 
-def create_enhanced_visualizations(run_ids, experiment_id, experiment_name, run_number=None):
+def create_enhanced_visualizations(run_ids, experiment_id, experiment_name, run_number=None, use_ray=True, num_cpus=None):
     """
     Create enhanced visualizations for the completed experiment runs.
 
@@ -1599,6 +1749,8 @@ def create_enhanced_visualizations(run_ids, experiment_id, experiment_name, run_
         experiment_id: MLflow experiment ID
         experiment_name: Name of the experiment
         run_number: Run number (optional)
+        use_ray: Whether to use Ray for parallel processing (default: True)
+        num_cpus: Number of CPUs to use for Ray. If None, uses all available minus 2.
     """
     if not run_ids:
         logger.warning("No run IDs provided for enhanced visualizations")
@@ -1622,16 +1774,63 @@ def create_enhanced_visualizations(run_ids, experiment_id, experiment_name, run_
         
     os.makedirs(output_dir, exist_ok=True)
 
-    # Generate and log enhanced plots
-    plots = log_enhanced_plots_to_mlflow(
-        experiment_id=experiment_id,
+    # Initialize Ray if requested
+    if use_ray and not ray.is_initialized():
+        try:
+            init_ray_for_mac(num_cpus)
+            logger.info("Ray initialized for enhanced visualization generation")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Ray: {e}. Will use sequential processing.")
+            use_ray = False
+
+    # Generate loss plots using Ray-powered plotting
+    plots = plot_loss_by_subgroups(
         run_ids=run_ids,
         output_dir=output_dir,
-        artifact_path="enhanced_plots",
-        run_number=run_number
+        show_markers=True,
+        line_smoothing=0.0,
+        use_ray=use_ray,
+        num_cpus=num_cpus
     )
 
+    # Log plots to MLflow
     if plots:
+        try:
+            # Make sure there's no active run that might conflict
+            if mlflow.active_run():
+                mlflow.end_run()
+            
+            # Generate a unique run name with timestamp
+            timestr = time.strftime("%Y%m%d-%H%M%S")
+            
+            with mlflow.start_run(
+                run_name=f"EnhancedPlots-{timestr}", experiment_id=experiment_id
+            ):
+                # Log artifacts
+                for plot_path in plots:
+                    mlflow.log_artifact(plot_path, "enhanced_plots")
+
+                # Log metadata
+                mlflow.set_tag("plot_type", "enhanced_loss_plots")
+                mlflow.set_tag("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                mlflow.set_tag("generated_by", os.environ.get("USER", "keirparker"))
+                mlflow.set_tag("runs_visualized", len(run_ids))
+                mlflow.set_tag("is_summary", "true")
+                
+                # Add run number if provided
+                if run_number is not None:
+                    mlflow.set_tag("run_number", str(run_number))
+
+                # Log the run IDs that were analyzed
+                mlflow.log_param("analyzed_runs", ",".join(run_ids))
+
+                logger.info(
+                    f"Enhanced plots logged to MLflow with run ID: {mlflow.active_run().info.run_id}"
+                )
+        except Exception as e:
+            logger.error(f"Error logging enhanced plots to MLflow: {e}")
+            logger.info(f"Enhanced plots saved locally to {output_dir}")
+
         logger.info(f"Generated {len(plots)} enhanced visualization plots")
     else:
         logger.warning("No enhanced visualization plots were generated")

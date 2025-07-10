@@ -5,11 +5,24 @@ from typing import Tuple, Dict, List, Optional, Union
 from loguru import logger
 import math
 
-from time_series.models.model_registry import register_model
-from time_series.models.fan_layers import (
-    FANLayer, FANLayerGated, FANPhaseOffsetLayer, 
-    FANPhaseOffsetLayerGated, HybridPhaseFANLayer
-)
+try:
+    from time_series.models.model_registry import register_model
+    from time_series.models.fan_layers import (
+        FANLayer, FANLayerGated, FANPhaseOffsetLayer, 
+        FANPhaseOffsetLayerGated, HybridPhaseFANLayer
+    )
+    from time_series.models.interference_layers import (
+        InterferenceFANLayer, AdaptiveInterferenceFANLayer, HarmonicInterferenceFANLayer
+    )
+except ImportError:
+    from .model_registry import register_model
+    from .fan_layers import (
+        FANLayer, FANLayerGated, FANPhaseOffsetLayer, 
+        FANPhaseOffsetLayerGated, HybridPhaseFANLayer
+    )
+    from .interference_layers import (
+        InterferenceFANLayer, AdaptiveInterferenceFANLayer, HarmonicInterferenceFANLayer
+    )
 
 
 
@@ -591,3 +604,179 @@ class PositionalEncoding(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
+
+
+@register_model('InterferenceFANForecaster')
+class InterferenceFANForecaster(TSForecastModel):
+    """
+    Pure phase-based FAN using constructive/destructive interference.
+    
+    Key Features:
+    - Unit amplitude phasors (phase-only learning)
+    - Multiple interference channels
+    - Natural wave interference physics
+    - No amplitude learning - only phase relationships
+    """
+    
+    def __init__(
+        self,
+        input_dim: int = 1,
+        hidden_dim: int = 128,
+        output_dim: int = 1,
+        horizon: int = 12,
+        n_interference_layers: int = 3,
+        interference_channels_per_layer: int = 4,
+        freqs_per_channel: int = 8,
+        dropout: float = 0.1
+    ):
+        super().__init__(input_dim, hidden_dim, output_dim, horizon, dropout)
+        
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        
+        self.interference_layers = nn.ModuleList([
+            InterferenceFANLayer(
+                input_dim=hidden_dim,
+                num_interference_channels=interference_channels_per_layer,
+                freqs_per_channel=freqs_per_channel,
+                include_phase_output=True
+            )
+            for _ in range(n_interference_layers)
+        ])
+        
+        self.dropout = nn.Dropout(dropout)
+        self.output_proj = nn.Linear(hidden_dim, output_dim * horizon)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = x.shape
+        
+        # Use last timestep
+        x = x[:, -1, :]
+        
+        # Project to hidden dimension
+        x = self.input_proj(x)
+        x = F.gelu(x)
+        
+        # Apply interference layers
+        for layer in self.interference_layers:
+            x = layer(x)
+            x = self.dropout(x)
+        
+        # Generate forecast
+        x = self.output_proj(x)
+        x = x.view(batch_size, self.horizon, self.output_dim)
+        
+        return x
+
+
+@register_model('AdaptiveInterferenceFANForecaster')
+class AdaptiveInterferenceFANForecaster(TSForecastModel):
+    """
+    Advanced interference-based FAN with adaptive frequency grouping.
+    
+    Features:
+    - Learnable frequency-to-group assignments
+    - Gated interference channels
+    - Adaptive phase relationships
+    """
+    
+    def __init__(
+        self,
+        input_dim: int = 1,
+        hidden_dim: int = 128,
+        output_dim: int = 1,
+        horizon: int = 12,
+        n_interference_layers: int = 3,
+        interference_groups_per_layer: int = 3,
+        freqs_per_group: int = 6,
+        dropout: float = 0.1
+    ):
+        super().__init__(input_dim, hidden_dim, output_dim, horizon, dropout)
+        
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        
+        self.interference_layers = nn.ModuleList([
+            AdaptiveInterferenceFANLayer(
+                input_dim=hidden_dim,
+                num_interference_groups=interference_groups_per_layer,
+                freqs_per_group=freqs_per_group,
+                adaptive_grouping=True
+            )
+            for _ in range(n_interference_layers)
+        ])
+        
+        self.dropout = nn.Dropout(dropout)
+        self.output_proj = nn.Linear(hidden_dim, output_dim * horizon)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = x.shape
+        
+        x = x[:, -1, :]
+        
+        x = self.input_proj(x)
+        x = F.gelu(x)
+        
+        for layer in self.interference_layers:
+            x = layer(x)
+            x = self.dropout(x)
+        
+        x = self.output_proj(x)
+        x = x.view(batch_size, self.horizon, self.output_dim)
+        
+        return x
+
+
+@register_model('HarmonicInterferenceFANForecaster')
+class HarmonicInterferenceFANForecaster(TSForecastModel):
+    """
+    Harmonic-based interference FAN using musical harmony principles.
+    
+    Features:
+    - Natural harmonic frequency relationships
+    - Mathematically elegant interference patterns
+    - Based on acoustic physics and musical theory
+    """
+    
+    def __init__(
+        self,
+        input_dim: int = 1,
+        hidden_dim: int = 128,
+        output_dim: int = 1,
+        horizon: int = 12,
+        n_harmonic_layers: int = 3,
+        fundamental_freqs_per_layer: int = 8,
+        max_harmonic: int = 4,
+        dropout: float = 0.1
+    ):
+        super().__init__(input_dim, hidden_dim, output_dim, horizon, dropout)
+        
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        
+        self.harmonic_layers = nn.ModuleList([
+            HarmonicInterferenceFANLayer(
+                input_dim=hidden_dim,
+                fundamental_freqs=fundamental_freqs_per_layer,
+                max_harmonic=max_harmonic,
+                phase_coupling_strength=0.1
+            )
+            for _ in range(n_harmonic_layers)
+        ])
+        
+        self.dropout = nn.Dropout(dropout)
+        self.output_proj = nn.Linear(hidden_dim, output_dim * horizon)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = x.shape
+        
+        x = x[:, -1, :]
+        
+        x = self.input_proj(x)
+        x = F.gelu(x)
+        
+        for layer in self.harmonic_layers:
+            x = layer(x)
+            x = self.dropout(x)
+        
+        x = self.output_proj(x)
+        x = x.view(batch_size, self.horizon, self.output_dim)
+        
+        return x

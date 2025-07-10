@@ -10,12 +10,33 @@ from .ts_models import (
     FANGatedForecaster,
     LSTMForecaster,
     TransformerForecaster,
-    PhaseOffsetForecaster
+    PhaseOffsetForecaster,
+    InterferenceFANForecaster,
+    AdaptiveInterferenceFANForecaster,
+    HarmonicInterferenceFANForecaster
 )
 
-from ..transformers.fan_transformer import FANTransformerForecaster
-from ..transformers.phase_offset_transformer import PhaseOffsetTransformerForecaster
-from ..transformers.phase_offset_gated_transformer import PhaseOffsetGatedTransformerForecaster
+try:
+    from ..transformers.fan_transformer import FANTransformerForecaster
+    from ..transformers.phase_offset_transformer import PhaseOffsetTransformerForecaster
+    from ..transformers.phase_offset_gated_transformer import PhaseOffsetGatedTransformerForecaster
+except ImportError:
+    # Fallback for local imports
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+    try:
+        from transformers.fan_transformer import FANTransformerForecaster
+        from transformers.phase_offset_transformer import PhaseOffsetTransformerForecaster
+        from transformers.phase_offset_gated_transformer import PhaseOffsetGatedTransformerForecaster
+    except ImportError:
+        # If transformers can't be imported, create dummy classes
+        class FANTransformerForecaster:
+            pass
+        class PhaseOffsetTransformerForecaster:
+            pass
+        class PhaseOffsetGatedTransformerForecaster:
+            pass
 
 __all__ = [
     'register_model',
@@ -32,6 +53,9 @@ __all__ = [
     'LSTMForecaster',
     'TransformerForecaster',
     'PhaseOffsetForecaster',
+    'InterferenceFANForecaster',
+    'AdaptiveInterferenceFANForecaster',
+    'HarmonicInterferenceFANForecaster',
     
     'FANTransformerForecaster',
     'PhaseOffsetTransformerForecaster',

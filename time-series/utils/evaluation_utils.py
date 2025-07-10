@@ -11,8 +11,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
 from loguru import logger
+import logging
 import mlflow
 from mlflow.tracking import MlflowClient
+import ray
 
 
 def setup_logger():
@@ -999,6 +1001,89 @@ def get_run_ids_from_experiment(
         return []
 
 
+@ray.remote
+def process_run_metrics(run_id, client, metric_name, include_validation=False, smooth_factor=None):
+    """Ray remote function to process run metrics in parallel"""
+    try:
+        run = client.get_run(run_id)
+        run_metrics = {
+            "model_name": run.data.params.get("model", "unknown"),
+            "dataset_type": run.data.params.get("dataset", run.data.params.get("dataset_type", "unknown")),
+            "train_loss_by_epoch": {},
+            "val_loss_by_epoch": {},
+            "run": run
+        }
+        
+        if run.data.params.get("dataset_type", "").lower() in ["electricity", "traffic", "solar-energy", "exchange-rate"]:
+            if "input_dim" in run.data.params:
+                input_dim = run.data.params.get("input_dim")
+                run_metrics["model_name"] = f"{run_metrics['model_name']} (d={input_dim})"
+        
+        for key, value in run.data.metrics.items():
+            if key.startswith(f"{metric_name}_epoch_") or key.startswith(f"{metric_name}"):
+                try:
+                    if "_epoch_" in key:
+                        epoch = int(key.split("_")[-1])
+                    elif key == metric_name and "epoch" in run.data.metrics:
+                        epoch = int(run.data.metrics["epoch"])
+                    else:
+                        continue
+                        
+                    run_metrics["train_loss_by_epoch"][epoch] = value
+                except (ValueError, TypeError):
+                    continue
+
+            if include_validation and (key.startswith("val_loss_epoch_") or key == "val_loss"):
+                try:
+                    if "_epoch_" in key:
+                        epoch = int(key.split("_")[-1])
+                    elif key == "val_loss" and "epoch" in run.data.metrics:
+                        epoch = int(run.data.metrics["epoch"])
+                    else:
+                        continue
+                        
+                    run_metrics["val_loss_by_epoch"][epoch] = value
+                except (ValueError, TypeError):
+                    continue
+        
+        # Apply smoothing if requested
+        if smooth_factor and len(run_metrics["train_loss_by_epoch"]) > 3:
+            window_size = int(len(run_metrics["train_loss_by_epoch"]) * smooth_factor / 100)
+            if window_size > 1:
+                epochs = sorted(run_metrics["train_loss_by_epoch"].keys())
+                losses = [run_metrics["train_loss_by_epoch"][e] for e in epochs]
+                
+                smoothed_losses = []
+                for j in range(len(losses)):
+                    start = max(0, j - window_size // 2)
+                    end = min(len(losses), j + window_size // 2 + 1)
+                    smoothed_losses.append(sum(losses[start:end]) / (end - start))
+                
+                for j, epoch in enumerate(epochs):
+                    run_metrics["train_loss_by_epoch"][epoch] = smoothed_losses[j]
+        
+        # Apply smoothing to validation losses if requested
+        if include_validation and smooth_factor and len(run_metrics["val_loss_by_epoch"]) > 3:
+            window_size = int(len(run_metrics["val_loss_by_epoch"]) * smooth_factor / 100)
+            if window_size > 1:
+                val_epochs = sorted(run_metrics["val_loss_by_epoch"].keys())
+                val_losses = [run_metrics["val_loss_by_epoch"][e] for e in val_epochs]
+                
+                smoothed_val_losses = []
+                for j in range(len(val_losses)):
+                    start = max(0, j - window_size // 2)
+                    end = min(len(val_losses), j + window_size // 2 + 1)
+                    smoothed_val_losses.append(sum(val_losses[start:end]) / (end - start))
+                
+                for j, epoch in enumerate(val_epochs):
+                    run_metrics["val_loss_by_epoch"][epoch] = smoothed_val_losses[j]
+        
+        return run_metrics
+    except Exception as e:
+        logger.error(f"Error processing run {run_id}: {e}")
+        return None
+
+
 def plot_losses_by_epoch_comparison(
     run_ids=None,
     experiment_id=None,
@@ -1010,28 +1095,63 @@ def plot_losses_by_epoch_comparison(
     only_best_models=False,
     best_metric="test_rmse"
 ):
-    """Plot loss curves by epoch for multiple runs on the same graph for comparison."""
+    """Plot loss curves by epoch for multiple runs on the same graph for comparison using Ray for parallelization."""
     try:
         logger.info(f"Generating loss comparison plot for {metric_name}")
         client = MlflowClient()
 
         os.makedirs(output_dir, exist_ok=True)
+        
+        # Initialize Ray if not already initialized
+        if not ray.is_initialized():
+            try:
+                # Initialize with appropriate settings for M2 Macbook
+                num_cpus = os.cpu_count() or 4
+                reserved_cpus = 2  # Reserve CPUs for system operations
+                ray_cpus = max(1, num_cpus - reserved_cpus)
+                
+                ray.init(
+                    num_cpus=ray_cpus,
+                    include_dashboard=False,
+                    ignore_reinit_error=True,
+                    _temp_dir="/tmp/ray_temp",  # Prevent permissions issues on macOS
+                    _system_config={
+                        "worker_register_timeout_seconds": 60,
+                        "object_spilling_config": '{"type": "filesystem", "params": {"directory_path": "/tmp/ray_spill"}}',
+                        "max_io_workers": 4  # Reduce I/O worker threads for Mac
+                    },
+                    logging_level=logging.WARNING,
+                )
+                logger.info(f"Ray initialized with {ray_cpus} CPUs")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Ray: {e}. Falling back to sequential processing.")
 
-        runs_data = []
+        # Collect run IDs
+        if run_ids is None and experiment_id is not None:
+            runs = client.search_runs(experiment_ids=[experiment_id])
+            run_ids = [run.info.run_id for run in runs]
+        
+        if not run_ids:
+            logger.warning("No runs specified for comparison")
+            return None
 
-        if run_ids:
+        # Process runs in parallel with Ray
+        if ray.is_initialized():
+            run_refs = [process_run_metrics.remote(
+                run_id, client, metric_name, include_validation, smooth_factor
+            ) for run_id in run_ids]
+            
+            run_metrics_list = ray.get(run_refs)
+            runs_data = [rm["run"] for rm in run_metrics_list if rm is not None]
+        else:
+            # Fallback to sequential processing
+            runs_data = []
             for run_id in run_ids:
                 try:
                     run = client.get_run(run_id)
                     runs_data.append(run)
                 except:
                     logger.warning(f"Could not find run with ID: {run_id}")
-        elif experiment_id:
-            runs = client.search_runs(experiment_ids=[experiment_id])
-            runs_data = runs
-        else:
-            logger.warning("No runs specified for comparison")
-            return None
 
         if not runs_data:
             logger.warning("No runs found for comparison")

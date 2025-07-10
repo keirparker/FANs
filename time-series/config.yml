@@ -5,6 +5,11 @@ seed: 42
 convergence_threshold: 0.1
 track_convergence: true
 
+# Ray configuration
+ray_config:
+  fail_on_ray_error: true  # Set to false to continue with sequential mode
+  force_sequential: false  # Set to true to skip Ray entirely
+
 models_to_run:
   # Hybrid Phase model
   - HybridPhaseFANForecaster
@@ -12,6 +17,9 @@ models_to_run:
   # Standard models
   - FANForecaster
   - PhaseOffsetForecaster
+  
+  # New interference-based model (phase-only learning)
+  - InterferenceFANForecaster
 
 # Datasets
 datasets_to_run:
@@ -20,7 +28,7 @@ datasets_to_run:
 hyperparameters:
   # Training parameters
   batch_size: 32
-  epochs: 100
+  epochs: 3
   lr: 0.0005
   weight_decay: 0.00005
   warmup_steps: 5

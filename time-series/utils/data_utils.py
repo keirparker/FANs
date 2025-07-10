@@ -18,6 +18,7 @@ from contextlib import contextmanager
 import time
 from functools import wraps
 import psutil
+import ray
 
 
 def performance_metrics(func):
@@ -59,8 +60,8 @@ def gpu_transfer_context(tensor_list: List[torch.Tensor], device: torch.device):
             transferred[i] = None
 
 
-@performance_metrics
-def add_noise(
+@ray.remote
+def add_noise_ray(
         data: np.ndarray,
         noise_level: float = 0.1,
         noise_type: str = "gaussian",
@@ -68,7 +69,7 @@ def add_noise(
         preserve_range: bool = True
 ) -> np.ndarray:
     """
-    Add sophisticated noise patterns to data with distribution control.
+    Add sophisticated noise patterns to data with distribution control (Ray remote version).
 
     Args:
         data: Input data array of shape (N,) or (N,C)
@@ -80,10 +81,97 @@ def add_noise(
 
     Returns:
         np.ndarray: Data with carefully controlled noise
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    if preserve_range:
+        orig_min, orig_max = np.min(data), np.max(data)
+        orig_range = orig_max - orig_min
+
+    if noise_type == "gaussian":
+        noise = np.random.normal(0, noise_level, size=data.shape)
+    elif noise_type == "uniform":
+        noise = np.random.uniform(-noise_level, noise_level, size=data.shape)
+    elif noise_type == "laplace":
+        noise = np.random.laplace(0, noise_level, size=data.shape)
+    elif noise_type == "salt_pepper":
+        noise = np.zeros_like(data)
+        salt_mask = np.random.random(size=data.shape) < (noise_level / 2)
+        noise[salt_mask] = 1.0
+        pepper_mask = np.random.random(size=data.shape) < (noise_level / 2)
+        noise[pepper_mask] = -1.0
+    elif noise_type == "poisson":
+        data_range = np.max(data) - np.min(data)
+        if data_range > 0:
+            scaled_data = (data - np.min(data)) / data_range * 255
+            noisy_data = np.random.poisson(scaled_data) / 255.0 * data_range + np.min(data)
+            noise = noisy_data - data
+        else:
+            noise = np.zeros_like(data)
+    elif noise_type == "speckle":
+        noise = data * np.random.normal(0, noise_level, size=data.shape)
+    else:
+        raise ValueError(f"Unsupported noise type: {noise_type}")
+
+    noisy_data = data + noise
+
+    if preserve_range:
+        noisy_min, noisy_max = np.min(noisy_data), np.max(noisy_data)
+        noisy_range = noisy_max - noisy_min
+
+        if noisy_range > 0:
+            noisy_data = (noisy_data - noisy_min) / noisy_range * orig_range + orig_min
+
+    return noisy_data
+
+
+@performance_metrics
+def add_noise(
+        data: np.ndarray,
+        noise_level: float = 0.1,
+        noise_type: str = "gaussian",
+        seed: Optional[int] = None,
+        preserve_range: bool = True,
+        parallel: bool = False
+) -> np.ndarray:
+    """
+    Add sophisticated noise patterns to data with distribution control.
+
+    Args:
+        data: Input data array of shape (N,) or (N,C)
+        noise_level: Noise magnitude (stdev for gaussian, range for uniform)
+        noise_type: Noise distribution type: "gaussian", "uniform", "laplace",
+                   "salt_pepper", "poisson", or "speckle"
+        seed: Random seed for reproducibility
+        preserve_range: Ensure noisy data maintains similar min/max range as original
+        parallel: Whether to use Ray for parallel processing (for large arrays)
+
+    Returns:
+        np.ndarray: Data with carefully controlled noise
 
     Raises:
         ValueError: If invalid noise_type specified
     """
+    if parallel and data.shape[0] > 1000:
+        if not ray.is_initialized():
+            ray.init(ignore_reinit_error=True, include_dashboard=False)
+            
+        # Split data into chunks for parallel processing
+        chunk_size = max(1, data.shape[0] // (os.cpu_count() or 4))
+        chunks = [data[i:i+chunk_size] for i in range(0, data.shape[0], chunk_size)]
+        
+        # Process chunks in parallel
+        noise_refs = [add_noise_ray.remote(
+            chunk, noise_level, noise_type, 
+            None if seed is None else seed + i, preserve_range
+        ) for i, chunk in enumerate(chunks)]
+        
+        # Collect results
+        result_chunks = ray.get(noise_refs)
+        return np.concatenate(result_chunks)
+    
+    # Non-parallel processing for smaller data or when not requested
     if seed is not None:
         np.random.seed(seed)
 
@@ -541,6 +629,18 @@ class AdaptiveTimeSeriesDataset(Dataset):
         }
 
 
+@ray.remote
+def create_dataset_shard(t_shard, data_shard, precision, device=None, augmentations=None, seed=None):
+    """Ray remote function to create a dataset shard in parallel"""
+    return AdaptiveTimeSeriesDataset(
+        t_shard, data_shard,
+        precision=precision,
+        device=device,
+        augmentations=augmentations,
+        seed=seed
+    )
+
+
 @performance_metrics
 def prepare_data_loaders(
     t_train: np.ndarray,
@@ -549,7 +649,8 @@ def prepare_data_loaders(
     t_val: Optional[np.ndarray] = None,
     data_val: Optional[np.ndarray] = None,
     device: Optional[torch.device] = None,
-    sampler_type: str = "random"
+    sampler_type: str = "random",
+    use_ray: bool = True
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """
     Create optimized DataLoaders with advanced batching strategies.
@@ -562,6 +663,7 @@ def prepare_data_loaders(
         data_val: Validation data values (optional)
         device: PyTorch device (optional)
         sampler_type: Type of sampling strategy ("random", "weighted", "sequential", "balanced")
+        use_ray: Whether to use Ray for parallel dataset creation (for large datasets)
 
     Returns:
         tuple: (train_loader, val_loader)
@@ -601,13 +703,41 @@ def prepare_data_loaders(
         {'type': 'shift', 'amount': 0.0, 'std': 0.1}
     ] if config["hyperparameters"].get("use_augmentation", False) else None
 
-    train_dataset = AdaptiveTimeSeriesDataset(
-        t_train, data_train,
-        precision=torch_precision,
-        device=device,
-        augmentations=augmentations,
-        seed=seed  # pass seed for reproducible augmentations
-    )
+    # Use Ray for parallel dataset creation when datasets are large
+    if use_ray and len(t_train) > 10000 and not ray.is_initialized():
+        ray.init(ignore_reinit_error=True, include_dashboard=False)
+        
+    if use_ray and len(t_train) > 10000:
+        # Create training dataset shards in parallel
+        num_shards = min(8, os.cpu_count() or 4)
+        shard_size = len(t_train) // num_shards
+        t_shards = [t_train[i*shard_size:(i+1)*shard_size] for i in range(num_shards-1)]
+        t_shards.append(t_train[(num_shards-1)*shard_size:])
+        
+        data_shards = [data_train[i*shard_size:(i+1)*shard_size] for i in range(num_shards-1)]
+        data_shards.append(data_train[(num_shards-1)*shard_size:])
+        
+        # Create dataset shards in parallel
+        shard_refs = [create_dataset_shard.remote(
+            t_shard, data_shard, torch_precision, None, augmentations, 
+            None if seed is None else seed + i
+        ) for i, (t_shard, data_shard) in enumerate(zip(t_shards, data_shards))]
+        
+        # Get dataset shards
+        dataset_shards = ray.get(shard_refs)
+        
+        # Combine shards with ConcatDataset
+        from torch.utils.data import ConcatDataset
+        train_dataset = ConcatDataset(dataset_shards)
+    else:
+        # Create dataset directly for smaller datasets
+        train_dataset = AdaptiveTimeSeriesDataset(
+            t_train, data_train,
+            precision=torch_precision,
+            device=device,
+            augmentations=augmentations,
+            seed=seed
+        )
 
     if sampler_type == "weighted":
         gradients = np.abs(np.diff(data_train, prepend=data_train[0]))
@@ -650,13 +780,36 @@ def prepare_data_loaders(
 
     val_loader = None
     if t_val is not None and data_val is not None:
-        val_dataset = AdaptiveTimeSeriesDataset(
-            t_val, data_val,
-            precision=torch_precision,
-            device=device,
-            augmentations=None,
-            seed=seed
-        )
+        if use_ray and len(t_val) > 10000:
+            # Create validation dataset shards in parallel (similar to training)
+            num_shards = min(8, os.cpu_count() or 4)
+            shard_size = len(t_val) // num_shards
+            t_val_shards = [t_val[i*shard_size:(i+1)*shard_size] for i in range(num_shards-1)]
+            t_val_shards.append(t_val[(num_shards-1)*shard_size:])
+            
+            data_val_shards = [data_val[i*shard_size:(i+1)*shard_size] for i in range(num_shards-1)]
+            data_val_shards.append(data_val[(num_shards-1)*shard_size:])
+            
+            # Create dataset shards in parallel
+            val_shard_refs = [create_dataset_shard.remote(
+                t_shard, data_shard, torch_precision, None, None, 
+                None if seed is None else seed + i + 100
+            ) for i, (t_shard, data_shard) in enumerate(zip(t_val_shards, data_val_shards))]
+            
+            # Get dataset shards
+            val_dataset_shards = ray.get(val_shard_refs)
+            
+            # Combine shards
+            from torch.utils.data import ConcatDataset
+            val_dataset = ConcatDataset(val_dataset_shards)
+        else:
+            val_dataset = AdaptiveTimeSeriesDataset(
+                t_val, data_val,
+                precision=torch_precision,
+                device=device,
+                augmentations=None,
+                seed=seed
+            )
 
         val_loader = DataLoader(
             val_dataset,
@@ -667,7 +820,12 @@ def prepare_data_loaders(
             persistent_workers=persistent_workers
         )
 
-    train_stats = train_dataset.statistics()
+    # Get statistics from train dataset (handle ConcatDataset case)
+    if isinstance(train_dataset, torch.utils.data.ConcatDataset):
+        train_stats = train_dataset.datasets[0].statistics()
+    else:
+        train_stats = train_dataset.statistics()
+        
     logger.debug(f"Train dataset stats: x_mean={train_stats['x_stats']['mean']:.3f}, "
                 f"y_mean={train_stats['y_stats']['mean']:.3f}, "
                 f"y_std={train_stats['y_stats']['std']:.3f}")

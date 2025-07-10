@@ -1,5 +1,10 @@
 experiment_name: "phase_offset_efficiency_test"
 
+# Ray configuration
+ray_config:
+  fail_on_ray_error: true  # Set to false to continue with sequential mode
+  force_sequential: false  # Set to true to skip Ray entirely
+
 models_to_run:
   - FAN
   - FANGated
@@ -27,7 +32,7 @@ hyperparameters:
   sparsity_factor: 0.5
   
   # Training parameters
-  epochs: 200
+  epochs: 5
   lr: 0.001
   min_lr: 0.000001
   weight_decay: 0.00001
